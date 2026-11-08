@@ -1,0 +1,119 @@
+services:
+
+  broker-py:
+    build: ./python
+    image: cc7261:python
+    command: ["python", "broker.py"]
+    volumes:
+      - ./python/broker.py:/app/broker.py
+      - ./python/protocolo.py:/app/protocolo.py
+
+  servidor-py-1:
+    build: ./python
+    image: cc7261:python
+    command: ["python", "servidor.py"]
+    environment:
+      NOME_SERVIDOR: servidor-py-1
+      BROKER_ADDR: tcp://broker-py:5556
+      DATA_FILE: /data/dados.json
+    volumes:
+      - ./python/servidor.py:/app/servidor.py
+      - ./python/protocolo.py:/app/protocolo.py
+      - dados-py-1:/data
+    depends_on: [broker-py]
+
+  servidor-py-2:
+    build: ./python
+    image: cc7261:python
+    command: ["python", "servidor.py"]
+    environment:
+      NOME_SERVIDOR: servidor-py-2
+      BROKER_ADDR: tcp://broker-py:5556
+      DATA_FILE: /data/dados.json
+    volumes:
+      - ./python/servidor.py:/app/servidor.py
+      - ./python/protocolo.py:/app/protocolo.py
+      - dados-py-2:/data
+    depends_on: [broker-py]
+
+  bot-py-1:
+    build: ./python
+    image: cc7261:python
+    command: ["python", "cliente.py"]
+    environment:
+      NOME_BOT: bot-py-1
+      CANAL_NOVO: canal-python-a
+      BROKER_ADDR: tcp://broker-py:5555
+    volumes:
+      - ./python/cliente.py:/app/cliente.py
+      - ./python/protocolo.py:/app/protocolo.py
+    depends_on: [servidor-py-1, servidor-py-2]
+
+  bot-py-2:
+    build: ./python
+    image: cc7261:python
+    command: ["python", "cliente.py"]
+    environment:
+      NOME_BOT: bot-py-2
+      CANAL_NOVO: canal-python-b
+      BROKER_ADDR: tcp://broker-py:5555
+    volumes:
+      - ./python/cliente.py:/app/cliente.py
+      - ./python/protocolo.py:/app/protocolo.py
+    depends_on: [servidor-py-1, servidor-py-2]
+
+  # ============ JAVASCRIPT (Integrante 2) ============
+  broker-js:
+    build: ./javascript
+    image: cc7261:javascript
+    command: ["node", "broker.js"]
+
+  servidor-js-1:
+    build: ./javascript
+    image: cc7261:javascript
+    command: ["node", "servidor.js"]
+    environment:
+      NOME_SERVIDOR: servidor-js-1
+      BROKER_ADDR: tcp://broker-js:5556
+      DATA_FILE: /data/dados.json
+    volumes:
+      - dados-js-1:/data
+    depends_on: [broker-js]
+
+  servidor-js-2:
+    build: ./javascript
+    image: cc7261:javascript
+    command: ["node", "servidor.js"]
+    environment:
+      NOME_SERVIDOR: servidor-js-2
+      BROKER_ADDR: tcp://broker-js:5556
+      DATA_FILE: /data/dados.json
+    volumes:
+      - dados-js-2:/data
+    depends_on: [broker-js]
+
+  bot-js-1:
+    build: ./javascript
+    image: cc7261:javascript
+    command: ["node", "cliente.js"]
+    environment:
+      NOME_BOT: bot-js-1
+      CANAL_NOVO: canal-js-a
+      BROKER_ADDR: tcp://broker-js:5555
+    depends_on: [servidor-js-1, servidor-js-2]
+
+  bot-js-2:
+    build: ./javascript
+    image: cc7261:javascript
+    command: ["node", "cliente.js"]
+    environment:
+      NOME_BOT: bot-js-2
+      CANAL_NOVO: canal-js-b
+      BROKER_ADDR: tcp://broker-js:5555
+    depends_on: [servidor-js-1, servidor-js-2]
+
+volumes:
+  dados-py-1:
+  dados-py-2:
+  dados-js-1:
+  dados-js-2:

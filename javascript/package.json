@@ -1,0 +1,10 @@
+{
+  "name": "bbs-parte1-js",
+  "version": "1.0.0",
+  "description": "BBS Parte 1 - cliente/servidor/broker em JavaScript (Node.js)",
+  "type": "commonjs",
+  "dependencies": {
+    "zeromq": "^6.1.0",
+    "protobufjs": "^7.4.0"
+  }
+}
