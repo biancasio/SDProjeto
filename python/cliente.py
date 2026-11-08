@@ -36,7 +36,6 @@ def listar_canais(socket):
     return list(resp.canais)
 
 
-# thread que fica recebendo as mensagens dos canais inscritos
 def receber(sub):
     while True:
         topico, corpo = sub.recv_multipart()
@@ -63,13 +62,11 @@ def main():
 
     canais = listar_canais(socket)
 
-    # 1) se existirem menos de 5 canais, cria um novo
     if len(canais) < 5:
         novo = f"canal-{NOME}-{random.randint(1, 999)}"
         enviar(socket, proto.empacotar(proto.CRIAR_CANAL, NOME, {"canal": novo}))
         canais = listar_canais(socket)
 
-    # 2) se inscrito em menos de 3 canais, inscreve em mais um
     inscritos = []
     while len(inscritos) < 3 and canais:
         escolhido = random.choice(canais)
@@ -80,10 +77,8 @@ def main():
         if len(set(inscritos)) >= len(set(canais)):
             break
 
-    # thread de recebimento das publicacoes
     threading.Thread(target=receber, args=(sub,), daemon=True).start()
 
-    # 3) loop infinito: escolhe um canal e envia 10 mensagens aleatorias (1s entre elas)
     while True:
         canais = listar_canais(socket)
         if not canais:

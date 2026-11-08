@@ -1,6 +1,6 @@
 services:
 
-  # ============ PYTHON ============
+  
   broker-py:
     build: ./python
     image: cc7261:python
@@ -72,7 +72,7 @@ services:
       - ./python/protocolo.py:/app/protocolo.py
     depends_on: [servidor-py-1, servidor-py-2]
 
-  # ============ JAVASCRIPT ============
+
   broker-js:
     build: ./javascript
     image: cc7261:javascript

@@ -59,12 +59,10 @@ def publicar(dados, msg, pub):
     if canal not in dados["canais"]:
         dados["canais"].append(canal)
 
-    # publica no proxy: 1o frame = topico (nome do canal), 2o frame = corpo protobuf
     corpo = proto.empacotar(proto.PUBLICAR, msg.origem,
                             {"canal": canal, "texto": texto})
     pub.send_multipart([canal.encode(), corpo])
 
-    # persiste a publicacao
     dados["publicacoes"].append({
         "canal": canal, "texto": texto, "origem": msg.origem,
         "timestamp": proto.agora_ms(),
@@ -79,7 +77,7 @@ socket.connect(BROKER_ADDR)
 
 pub = context.socket(zmq.PUB)
 pub.connect(PROXY_ADDR)
-time.sleep(1)  # tempo para o PUB conectar antes de publicar
+time.sleep(1)  
 
 dados = carregar()
 print(f"{NOME} rodando | canais={dados['canais']}", flush=True)

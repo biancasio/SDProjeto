@@ -32,7 +32,6 @@ async function listarCanais() {
   return resp.canais || [];
 }
 
-// loop que recebe as mensagens dos canais inscritos
 async function receber() {
   for await (const [topico, corpo] of sub) {
     const msg = proto.desempacotar(corpo);
@@ -55,14 +54,12 @@ async function main() {
 
   let canais = await listarCanais();
 
-  // 1) se menos de 5 canais, cria um novo
   if (canais.length < 5) {
     const novo = `canal-${NOME}-${Math.floor(Math.random() * 999) + 1}`;
     await enviar(proto.empacotar(proto.CRIAR_CANAL, NOME, { canal: novo }));
     canais = await listarCanais();
   }
 
-  // 2) se inscrito em menos de 3 canais, inscreve em mais um
   const inscritos = [];
   while (inscritos.length < 3 && canais.length) {
     const escolhido = canais[Math.floor(Math.random() * canais.length)];
@@ -74,9 +71,8 @@ async function main() {
     if (new Set(inscritos).size >= new Set(canais).size) break;
   }
 
-  receber(); // roda em paralelo
+  receber(); 
 
-  // 3) loop infinito: escolhe um canal e envia 10 mensagens aleatorias (1s entre elas)
   while (true) {
     canais = await listarCanais();
     if (!canais.length) {
