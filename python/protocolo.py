@@ -3,6 +3,7 @@ import datetime
 
 import mensagem_pb2
 
+# tipos de mensagem
 LOGIN = "login"
 LOGIN_OK = "login_ok"
 LOGIN_ERRO = "login_erro"
@@ -11,6 +12,10 @@ CANAL_OK = "canal_ok"
 CANAL_ERRO = "canal_erro"
 LISTAR_CANAIS = "listar_canais"
 LISTA_CANAIS = "lista_canais"
+# parte 2 - publicacao
+PUBLICAR = "publicar"
+PUB_OK = "pub_ok"
+PUB_ERRO = "pub_erro"
 
 
 def agora_ms():

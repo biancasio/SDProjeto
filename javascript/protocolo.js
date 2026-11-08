@@ -9,6 +9,10 @@ const CANAL_OK = "canal_ok";
 const CANAL_ERRO = "canal_erro";
 const LISTAR_CANAIS = "listar_canais";
 const LISTA_CANAIS = "lista_canais";
+// parte 2 - publicacao
+const PUBLICAR = "publicar";
+const PUB_OK = "pub_ok";
+const PUB_ERRO = "pub_erro";
 
 const root = protobuf.loadSync(path.join(__dirname, "mensagem.proto"));
 const Mensagem = root.lookupType("cc7261.Mensagem");
@@ -43,5 +47,6 @@ module.exports = {
   LOGIN, LOGIN_OK, LOGIN_ERRO,
   CRIAR_CANAL, CANAL_OK, CANAL_ERRO,
   LISTAR_CANAIS, LISTA_CANAIS,
+  PUBLICAR, PUB_OK, PUB_ERRO,
   agoraMs, empacotar, desempacotar, formatar,
 };

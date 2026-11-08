@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package cc7261;
+
+option java_package = "br.fei.cc7261.proto";
+option java_outer_classname = "Protocolo";
+
+message Mensagem {
+  string tipo = 1;
+  int64 timestamp = 2;
+  string origem = 3;
+  map<string, string> dados = 4;
+  repeated string canais = 5;
+}

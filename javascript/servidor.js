@@ -6,14 +6,15 @@ const proto = require("./protocolo");
 const NOME = process.env.NOME_SERVIDOR || "servidor-js";
 const DATA_FILE = process.env.DATA_FILE || "/data/dados.json";
 const BROKER_ADDR = process.env.BROKER_ADDR || "tcp://broker-js:5556";
+const PROXY_ADDR = process.env.PROXY_ADDR || "tcp://proxy-js:5557";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function carregar() {
   try {
-    if (fs.existsSync(DATA_FILE)) {
-      return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
-    }
+    if (fs.existsSync(DATA_FILE)) return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
   } catch (_) {}
-  return { logins: [], canais: [] };
+  return { logins: [], canais: [], publicacoes: [] };
 }
 
 function salvar(dados) {
@@ -43,10 +44,30 @@ function listar(dados) {
   return proto.empacotar(proto.LISTA_CANAIS, NOME, null, dados.canais);
 }
 
+async function publicar(dados, msg, pub) {
+  const canal = (msg.dados.canal || "").trim();
+  const texto = msg.dados.texto || "";
+  if (!canal) return proto.empacotar(proto.PUB_ERRO, NOME, { motivo: "canal vazio" });
+  if (!dados.canais.includes(canal)) dados.canais.push(canal);
+
+  const corpo = proto.empacotar(proto.PUBLICAR, msg.origem, { canal, texto });
+  await pub.send([canal, corpo]);
+
+  dados.publicacoes.push({ canal, texto, origem: msg.origem, timestamp: proto.agoraMs() });
+  salvar(dados);
+  return proto.empacotar(proto.PUB_OK, NOME, { canal });
+}
+
 async function main() {
   const dados = carregar();
+
   const socket = new zmq.Reply();
   await socket.connect(BROKER_ADDR);
+
+  const pub = new zmq.Publisher();
+  pub.connect(PROXY_ADDR);
+  await sleep(1000);do
+
   console.log(`${NOME} rodando | canais=${JSON.stringify(dados.canais)}`);
 
   for await (const [raw] of socket) {
@@ -57,6 +78,7 @@ async function main() {
     if (msg.tipo === proto.LOGIN) resp = login(dados, msg);
     else if (msg.tipo === proto.CRIAR_CANAL) resp = criarCanal(dados, msg);
     else if (msg.tipo === proto.LISTAR_CANAIS) resp = listar(dados);
+    else if (msg.tipo === proto.PUBLICAR) resp = await publicar(dados, msg, pub);
     else resp = proto.empacotar(proto.LOGIN_ERRO, NOME, { motivo: "tipo invalido" });
 
     console.log(`${NOME} respondeu: ${proto.formatar(proto.desempacotar(resp))}`);
