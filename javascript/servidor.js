@@ -1,86 +1,60 @@
-const fs = require("fs");
-const path = require("path");
 const zmq = require("zeromq");
 const proto = require("./protocolo");
 
-const NOME = process.env.NOME_SERVIDOR || "servidor-js";
-const DATA_FILE = process.env.DATA_FILE || "/data/dados.json";
-const BROKER_ADDR = process.env.BROKER_ADDR || "tcp://broker-js:5556";
-const PROXY_ADDR = process.env.PROXY_ADDR || "tcp://proxy-js:5557";
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const NOME = process.env.NOME_REFERENCIA || "referencia-js";
+const PORTA = process.env.PORTA_REFERENCIA || "5560";
+const TIMEOUT = 30000; 
 
-function carregar() {
-  try {
-    if (fs.existsSync(DATA_FILE)) return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
-  } catch (_) {}
-  return { logins: [], canais: [], publicacoes: [] };
+const servidores = {};  
+const ultimoHb = {};    
+let proximoRank = 0;
+
+function darRank(msg) {
+  const nome = msg.dados.nome || "";
+  if (!(nome in servidores)) {
+    servidores[nome] = proximoRank++;
+  }
+  ultimoHb[nome] = Date.now();
+  return proto.empacotar(proto.RANK_OK, NOME, { nome, rank: String(servidores[nome]) });
 }
 
-function salvar(dados) {
-  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-  fs.writeFileSync(DATA_FILE, JSON.stringify(dados, null, 2), "utf-8");
+function listar() {
+  const itens = Object.entries(servidores).map(([n, r]) => `${n}:${r}`);
+  return proto.empacotar(proto.LISTA_SERVIDORES, NOME, null, itens);
 }
 
-function login(dados, msg) {
-  const usuario = (msg.dados.usuario || "").trim();
-  if (!usuario) return proto.empacotar(proto.LOGIN_ERRO, NOME, { motivo: "usuario vazio" });
-  dados.logins.push({ usuario, timestamp: proto.agoraMs() });
-  salvar(dados);
-  return proto.empacotar(proto.LOGIN_OK, NOME, { usuario });
+function heartbeat(msg) {
+  const nome = msg.dados.nome || "";
+  if (nome in servidores) ultimoHb[nome] = Date.now();
+  
+  return proto.empacotar(proto.HEARTBEAT_OK, NOME, { ok: "1" });
 }
 
-function criarCanal(dados, msg) {
-  const canal = (msg.dados.canal || "").trim();
-  if (!canal) return proto.empacotar(proto.CANAL_ERRO, NOME, { motivo: "canal vazio" });
-  if (dados.canais.includes(canal))
-    return proto.empacotar(proto.CANAL_ERRO, NOME, { motivo: "canal ja existe" });
-  dados.canais.push(canal);
-  salvar(dados);
-  return proto.empacotar(proto.CANAL_OK, NOME, { canal });
-}
 
-function listar(dados) {
-  return proto.empacotar(proto.LISTA_CANAIS, NOME, null, dados.canais);
-}
-
-async function publicar(dados, msg, pub) {
-  const canal = (msg.dados.canal || "").trim();
-  const texto = msg.dados.texto || "";
-  if (!canal) return proto.empacotar(proto.PUB_ERRO, NOME, { motivo: "canal vazio" });
-  if (!dados.canais.includes(canal)) dados.canais.push(canal);
-
-  const corpo = proto.empacotar(proto.PUBLICAR, msg.origem, { canal, texto });
-  await pub.send([canal, corpo]);
-
-  dados.publicacoes.push({ canal, texto, origem: msg.origem, timestamp: proto.agoraMs() });
-  salvar(dados);
-  return proto.empacotar(proto.PUB_OK, NOME, { canal });
-}
+setInterval(() => {
+  const agora = Date.now();
+  for (const nome of Object.keys(ultimoHb)) {
+    if (agora - ultimoHb[nome] > TIMEOUT) {
+      delete servidores[nome];
+      delete ultimoHb[nome];
+      console.log(`${NOME}: servidor ${nome} removido (sem heartbeat)`);
+    }
+  }
+}, 5000);
 
 async function main() {
-  const dados = carregar();
-
   const socket = new zmq.Reply();
-  await socket.connect(BROKER_ADDR);
-
-  const pub = new zmq.Publisher();
-  pub.connect(PROXY_ADDR);
-  await sleep(1000);do
-
-  console.log(`${NOME} rodando | canais=${JSON.stringify(dados.canais)}`);
+  await socket.bind(`tcp://*:${PORTA}`);
+  console.log(`${NOME} rodando na porta ${PORTA}`);
 
   for await (const [raw] of socket) {
     const msg = proto.desempacotar(raw);
-    console.log(`${NOME} recebeu: ${proto.formatar(msg)}`);
-
     let resp;
-    if (msg.tipo === proto.LOGIN) resp = login(dados, msg);
-    else if (msg.tipo === proto.CRIAR_CANAL) resp = criarCanal(dados, msg);
-    else if (msg.tipo === proto.LISTAR_CANAIS) resp = listar(dados);
-    else if (msg.tipo === proto.PUBLICAR) resp = await publicar(dados, msg, pub);
-    else resp = proto.empacotar(proto.LOGIN_ERRO, NOME, { motivo: "tipo invalido" });
-
+    if (msg.tipo === proto.RANK) resp = darRank(msg);
+    else if (msg.tipo === proto.LISTAR_SERVIDORES) resp = listar();
+    else if (msg.tipo === proto.HEARTBEAT) resp = heartbeat(msg);
+    else resp = proto.empacotar(proto.RANK_OK, NOME, { motivo: "tipo invalido" });
     console.log(`${NOME} respondeu: ${proto.formatar(proto.desempacotar(resp))}`);
     await socket.send(resp);
   }

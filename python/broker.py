@@ -1,6 +1,5 @@
 import zmq
 
-
 context = zmq.Context()
 poller = zmq.Poller()
 

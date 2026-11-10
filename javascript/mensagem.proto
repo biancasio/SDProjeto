@@ -11,4 +11,5 @@ message Mensagem {
   string origem = 3;
   map<string, string> dados = 4;
   repeated string canais = 5;
+  int64 contador = 6;   
 }

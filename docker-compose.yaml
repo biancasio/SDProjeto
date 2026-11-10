@@ -1,6 +1,6 @@
+
 services:
 
-  
   broker-py:
     build: ./python
     image: cc7261:python
@@ -16,6 +16,17 @@ services:
     volumes:
       - ./python/proxy.py:/app/proxy.py
 
+  referencia-py:
+    build: ./python
+    image: cc7261:python
+    command: ["python", "referencia.py"]
+    environment:
+      NOME_REFERENCIA: referencia-py
+      PORTA_REFERENCIA: "5560"
+    volumes:
+      - ./python/referencia.py:/app/referencia.py
+      - ./python/protocolo.py:/app/protocolo.py
+
   servidor-py-1:
     build: ./python
     image: cc7261:python
@@ -23,13 +34,16 @@ services:
     environment:
       NOME_SERVIDOR: servidor-py-1
       BROKER_ADDR: tcp://broker-py:5556
-      PROXY_ADDR: tcp://proxy-py:5557
+      PROXY_PUB: tcp://proxy-py:5557
+      PROXY_SUB: tcp://proxy-py:5558
+      REF_ADDR: tcp://referencia-py:5560
+      PORTA_COORD: "5561"
       DATA_FILE: /data/dados.json
     volumes:
       - ./python/servidor.py:/app/servidor.py
       - ./python/protocolo.py:/app/protocolo.py
       - dados-py-1:/data
-    depends_on: [broker-py, proxy-py]
+    depends_on: [broker-py, proxy-py, referencia-py]
 
   servidor-py-2:
     build: ./python
@@ -38,13 +52,16 @@ services:
     environment:
       NOME_SERVIDOR: servidor-py-2
       BROKER_ADDR: tcp://broker-py:5556
-      PROXY_ADDR: tcp://proxy-py:5557
+      PROXY_PUB: tcp://proxy-py:5557
+      PROXY_SUB: tcp://proxy-py:5558
+      REF_ADDR: tcp://referencia-py:5560
+      PORTA_COORD: "5561"
       DATA_FILE: /data/dados.json
     volumes:
       - ./python/servidor.py:/app/servidor.py
       - ./python/protocolo.py:/app/protocolo.py
       - dados-py-2:/data
-    depends_on: [broker-py, proxy-py]
+    depends_on: [broker-py, proxy-py, referencia-py]
 
   bot-py-1:
     build: ./python
@@ -72,11 +89,18 @@ services:
       - ./python/protocolo.py:/app/protocolo.py
     depends_on: [servidor-py-1, servidor-py-2]
 
-
   broker-js:
     build: ./javascript
     image: cc7261:javascript
     command: ["node", "broker.js"]
+
+  referencia-js:
+    build: ./javascript
+    image: cc7261:javascript
+    command: ["node", "referencia.js"]
+    environment:
+      NOME_REFERENCIA: referencia-js
+      PORTA_REFERENCIA: "5560"
 
   servidor-js-1:
     build: ./javascript
@@ -85,11 +109,14 @@ services:
     environment:
       NOME_SERVIDOR: servidor-js-1
       BROKER_ADDR: tcp://broker-js:5556
-      PROXY_ADDR: tcp://proxy-py:5557
+      PROXY_PUB: tcp://proxy-py:5557
+      PROXY_SUB: tcp://proxy-py:5558
+      REF_ADDR: tcp://referencia-js:5560
+      PORTA_COORD: "5561"
       DATA_FILE: /data/dados.json
     volumes:
       - dados-js-1:/data
-    depends_on: [broker-js, proxy-py]
+    depends_on: [broker-js, proxy-py, referencia-js]
 
   servidor-js-2:
     build: ./javascript
@@ -98,11 +125,14 @@ services:
     environment:
       NOME_SERVIDOR: servidor-js-2
       BROKER_ADDR: tcp://broker-js:5556
-      PROXY_ADDR: tcp://proxy-py:5557
+      PROXY_PUB: tcp://proxy-py:5557
+      PROXY_SUB: tcp://proxy-py:5558
+      REF_ADDR: tcp://referencia-js:5560
+      PORTA_COORD: "5561"
       DATA_FILE: /data/dados.json
     volumes:
       - dados-js-2:/data
-    depends_on: [broker-js, proxy-py]
+    depends_on: [broker-js, proxy-py, referencia-js]
 
   bot-js-1:
     build: ./javascript
