@@ -3,10 +3,10 @@ const proto = require("./protocolo");
 
 const NOME = process.env.NOME_REFERENCIA || "referencia-js";
 const PORTA = process.env.PORTA_REFERENCIA || "5560";
-const TIMEOUT = 30000; 
+const TIMEOUT = 30000;
 
-const servidores = {};  
-const ultimoHb = {};   
+const servidores = {};
+const ultimoHb = {};
 let proximoRank = 0;
 
 function darRank(msg) {

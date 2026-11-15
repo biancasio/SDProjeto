@@ -1,4 +1,3 @@
-
 services:
 
   broker-py:
@@ -93,6 +92,10 @@ services:
     build: ./javascript
     image: cc7261:javascript
     command: ["node", "broker.js"]
+    volumes:
+      - ./javascript/broker.js:/app/broker.js
+      - ./javascript/protocolo.js:/app/protocolo.js
+      - ./javascript/mensagem.proto:/app/mensagem.proto
 
   referencia-js:
     build: ./javascript
@@ -101,6 +104,10 @@ services:
     environment:
       NOME_REFERENCIA: referencia-js
       PORTA_REFERENCIA: "5560"
+    volumes:
+      - ./javascript/referencia.js:/app/referencia.js
+      - ./javascript/protocolo.js:/app/protocolo.js
+      - ./javascript/mensagem.proto:/app/mensagem.proto
 
   servidor-js-1:
     build: ./javascript
@@ -115,6 +122,9 @@ services:
       PORTA_COORD: "5561"
       DATA_FILE: /data/dados.json
     volumes:
+      - ./javascript/servidor.js:/app/servidor.js
+      - ./javascript/protocolo.js:/app/protocolo.js
+      - ./javascript/mensagem.proto:/app/mensagem.proto
       - dados-js-1:/data
     depends_on: [broker-js, proxy-py, referencia-js]
 
@@ -131,6 +141,9 @@ services:
       PORTA_COORD: "5561"
       DATA_FILE: /data/dados.json
     volumes:
+      - ./javascript/servidor.js:/app/servidor.js
+      - ./javascript/protocolo.js:/app/protocolo.js
+      - ./javascript/mensagem.proto:/app/mensagem.proto
       - dados-js-2:/data
     depends_on: [broker-js, proxy-py, referencia-js]
 
@@ -142,6 +155,10 @@ services:
       NOME_BOT: bot-js-1
       BROKER_ADDR: tcp://broker-js:5555
       PROXY_ADDR: tcp://proxy-py:5558
+    volumes:
+      - ./javascript/cliente.js:/app/cliente.js
+      - ./javascript/protocolo.js:/app/protocolo.js
+      - ./javascript/mensagem.proto:/app/mensagem.proto
     depends_on: [servidor-js-1, servidor-js-2]
 
   bot-js-2:
@@ -152,6 +169,10 @@ services:
       NOME_BOT: bot-js-2
       BROKER_ADDR: tcp://broker-js:5555
       PROXY_ADDR: tcp://proxy-py:5558
+    volumes:
+      - ./javascript/cliente.js:/app/cliente.js
+      - ./javascript/protocolo.js:/app/protocolo.js
+      - ./javascript/mensagem.proto:/app/mensagem.proto
     depends_on: [servidor-js-1, servidor-js-2]
 
 volumes:
