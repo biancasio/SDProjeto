@@ -66,3 +66,4 @@ while True:
         resp = proto.empacotar(proto.RANK_OK, NOME, {"motivo": "tipo invalido"})
     print(f"{NOME} respondeu: {proto.formatar(proto.desempacotar(resp))}", flush=True)
     socket.send(resp)
+    

@@ -276,3 +276,4 @@ while True:
             sincronizar_relogio()
         except Exception:
             eleger(ref, pub)
+            

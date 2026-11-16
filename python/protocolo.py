@@ -71,3 +71,4 @@ def formatar(msg):
     dados = dict(msg.dados)
     extra = f" canais={list(msg.canais)}" if msg.canais else ""
     return f"[{dt} C{msg.contador}] {msg.tipo} de {msg.origem} dados={dados}{extra}"
+    
