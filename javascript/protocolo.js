@@ -9,37 +9,38 @@ const CANAL_OK = "canal_ok";
 const CANAL_ERRO = "canal_erro";
 const LISTAR_CANAIS = "listar_canais";
 const LISTA_CANAIS = "lista_canais";
-
+// parte 2 - publicacao
 const PUBLICAR = "publicar";
 const PUB_OK = "pub_ok";
 const PUB_ERRO = "pub_erro";
-
+// parte 3 - referencia
 const RANK = "rank";
 const RANK_OK = "rank_ok";
 const LISTAR_SERVIDORES = "listar_servidores";
 const LISTA_SERVIDORES = "lista_servidores";
 const HEARTBEAT = "heartbeat";
 const HEARTBEAT_OK = "heartbeat_ok";
-
+// parte 4 - eleicao e sincronizacao de relogio (Berkeley)
 const RELOGIO = "relogio";
 const RELOGIO_OK = "relogio_ok";
 const ELEICAO = "eleicao";
 const ELEICAO_OK = "eleicao_ok";
 const COORDENADOR = "coordenador";
 const TOPICO_SERVERS = "servers";
-
+// parte 5 - replicacao (consistencia eventual via pub/sub)
 const REPLICAR = "replicar";
 const TOPICO_REPLICACAO = "replicacao";
 
 const root = protobuf.loadSync(path.join(__dirname, "mensagem.proto"));
 const Mensagem = root.lookupType("cc7261.Mensagem");
 
+// relogio logico de Lamport
 class Relogio {
   constructor() {
     this.contador = 0;
   }
   evento() {
-    this.contador += 1; 
+    this.contador += 1; // incrementa antes de enviar
     return this.contador;
   }
   receber(recebido) {

@@ -14,14 +14,16 @@ PROXY_ADDR = os.environ.get("PROXY_ADDR", "tcp://proxy-py:5558")
 context = zmq.Context()
 relogio = proto.Relogio()
 
+
 def enviar(socket, tipo, dados=None):
     raw = proto.empacotar(tipo, NOME, dados, contador=relogio.evento())
     print(f"{NOME} enviou: {proto.formatar(proto.desempacotar(raw))}", flush=True)
     socket.send(raw)
     resp = proto.desempacotar(socket.recv())
-    relogio.receber(resp.contador)  
+    relogio.receber(resp.contador)  # ajusta relogio logico ao receber
     print(f"{NOME} recebeu: {proto.formatar(resp)}", flush=True)
     return resp
+
 
 def fazer_login(socket):
     while True:
@@ -31,22 +33,25 @@ def fazer_login(socket):
         print(f"{NOME} login falhou, tentando de novo", flush=True)
         time.sleep(1)
 
+
 def listar_canais(socket):
     resp = enviar(socket, proto.LISTAR_CANAIS)
     return list(resp.canais)
 
 
+# thread que recebe as mensagens dos canais inscritos
 def receber(sub):
     while True:
         topico, corpo = sub.recv_multipart()
         msg = proto.desempacotar(corpo)
-        relogio.receber(msg.contador)  
+        relogio.receber(msg.contador)  # ajusta relogio logico ao receber
         recebido = datetime.datetime.now().strftime("%H:%M:%S")
         enviado = datetime.datetime.fromtimestamp(msg.timestamp / 1000).strftime("%H:%M:%S")
         canal = dict(msg.dados).get("canal", "")
         texto = dict(msg.dados).get("texto", "")
         print(f"{NOME} [canal {canal}] '{texto}' (C{msg.contador}, "
               f"enviado {enviado}, recebido {recebido})", flush=True)
+
 
 def main():
     socket = context.socket(zmq.REQ)
@@ -61,12 +66,13 @@ def main():
     fazer_login(socket)
     canais = listar_canais(socket)
 
-    
+    # 1) se existirem menos de 5 canais, cria um novo
     if len(canais) < 5:
         novo = f"canal-{len(canais) + 1}"
         enviar(socket, proto.CRIAR_CANAL, {"canal": novo})
         canais = listar_canais(socket)
 
+    # 2) se inscrito em menos de 3 canais, inscreve em mais um
     inscritos = []
     while len(inscritos) < 3 and canais:
         escolhido = random.choice(canais)
@@ -79,6 +85,7 @@ def main():
 
     threading.Thread(target=receber, args=(sub,), daemon=True).start()
 
+    # 3) loop: escolhe um canal e envia 10 mensagens aleatorias (1s entre elas)
     while True:
         canais = listar_canais(socket)
         if not canais:
@@ -90,5 +97,5 @@ def main():
             enviar(socket, proto.PUBLICAR, {"canal": canal, "texto": texto})
             time.sleep(1)
 
-main()
 
+main()

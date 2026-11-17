@@ -4,11 +4,11 @@ const zmq = require("zeromq");
 const proto = require("./protocolo");
 
 const NOME = process.env.NOME_SERVIDOR || "servidor-js";
-const DATA_FILE = process.env.DATA_FILE || "/dacta/dados.json";
+const DATA_FILE = process.env.DATA_FILE || "/data/dados.json";
 const BROKER_ADDR = process.env.BROKER_ADDR || "tcp://broker-js:5556";
 const PROXY_PUB = process.env.PROXY_PUB || "tcp://proxy-py:5557";
 const PROXY_SUB = process.env.PROXY_SUB || "tcp://proxy-py:5558";
-const REF_ADDR = process.env.REF_ADDR || "tcp://referencia-js:5560";
+const REF_ADDR = process.env.REF_ADDR || "tcp://referencia-py:5560";
 const PORTA_COORD = process.env.PORTA_COORD || "5561";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -17,6 +17,7 @@ let rank = null;
 let coordenador = null;
 let contadorMsg = 0;
 let horaOffset = 0;
+let eleicaoPendente = false; // marcado quando recebo pedido de eleicao de rank menor
 
 const ref = new zmq.Request();
 const pub = new zmq.Publisher();
@@ -91,54 +92,71 @@ async function enviarHeartbeat() {
   await ref.send(proto.empacotar(proto.HEARTBEAT, NOME, { nome: NOME }, null, relogio.evento()));
   const [raw] = await ref.receive();
   relogio.receber(proto.desempacotar(raw).contador);
-  // parte 4: a referencia NAO devolve mais a hora (vem do coordenador)
 }
 
-// --- eleicao por bullying (maior rank vence) ---
-async function eleger() {
-  const servidores = await listarServidores();
-  if (!servidores.length) {
-    coordenador = NOME;
-    return;
+// --- chamada REQ para outro servidor (porta 5561) com timeout ---
+async function chamarServidor(nomeDestino, tipo, dadosMsg = null) {
+  const s = new zmq.Request();
+  s.receiveTimeout = 2000;
+  s.sendTimeout = 2000;
+  s.linger = 0;
+  s.connect(`tcp://${nomeDestino}:${PORTA_COORD}`);
+  try {
+    await s.send(proto.empacotar(tipo, NOME, dadosMsg, null, relogio.evento()));
+    const [raw] = await s.receive();
+    const resp = proto.desempacotar(raw);
+    relogio.receber(resp.contador);
+    return resp;
+  } finally {
+    try { s.close(); } catch (_) {}
   }
-  let vencedor = servidores[0];
-  for (const s of servidores) if (s[1] > vencedor[1]) vencedor = s;
-  coordenador = vencedor[0];
-  console.log(`${NOME} acha que o coordenador e ${coordenador}`);
-  if (coordenador === NOME) {
-    const corpo = proto.empacotar(proto.COORDENADOR, NOME, { coordenador: NOME }, null, relogio.evento());
-    await pub.send([proto.TOPICO_SERVERS, corpo]);
-    console.log(`${NOME} se anunciou como coordenador`);
+}
+
+async function virarCoordenador() {
+  coordenador = NOME;
+  const corpo = proto.empacotar(proto.COORDENADOR, NOME, { coordenador: NOME }, null, relogio.evento());
+  await pub.send([proto.TOPICO_SERVERS, corpo]);
+  console.log(`${NOME} se anunciou como coordenador`);
+}
+
+// --- eleicao por bullying (algoritmo do valentao) ---
+// pede eleicao a todos os servidores de rank MAIOR. Se algum responde OK, ele
+// assume a eleicao e este servidor espera o anuncio. Se nenhum responde (estao
+// mortos), este servidor vira o coordenador e avisa pelo topico 'servers'.
+async function eleger() {
+  eleicaoPendente = false;
+  console.log(`${NOME} iniciou eleicao (rank ${rank})`);
+  const servidores = await listarServidores();
+  const maiores = servidores.filter(([n, r]) => r > rank && n !== NOME).map(([n]) => n);
+
+  let recebeuOk = false;
+  for (const nomeMaior of maiores) {
+    try {
+      const resp = await chamarServidor(nomeMaior, proto.ELEICAO, { nome: NOME });
+      if (resp.tipo === proto.ELEICAO_OK) recebeuOk = true;
+    } catch (e) {
+      // servidor de rank maior nao respondeu: esta morto, ignora
+    }
+  }
+
+  if (recebeuOk) {
+    console.log(`${NOME} recebeu OK de rank maior, aguardando anuncio do coordenador`);
+    coordenador = null;
+  } else {
+    await virarCoordenador();
   }
 }
 
 // --- sincronizacao de relogio (Berkeley) ---
 async function sincronizarRelogio() {
   if (coordenador === NOME || coordenador === null) return;
-  const s = new zmq.Request();
-  s.receiveTimeout = 3000;
-  s.connect(`tcp://${coordenador}:${PORTA_COORD}`);
-  try {
-    const tEnvio = proto.agoraMs();
-    await s.send(proto.empacotar(proto.RELOGIO, NOME, null, null, relogio.evento()));
-    const [raw] = await s.receive();
-    const resp = proto.desempacotar(raw);
-    relogio.receber(resp.contador);
-    // latencia: metade do tempo de ida e volta (RTT), como no slide de Berkeley
-    const rtt = proto.agoraMs() - tEnvio;
-    const horaCoord = Number(resp.dados.hora || proto.agoraMs());
-    // compensa a latencia: a hora do coordenador ja "andou" ~rtt/2 ate chegar
-    horaOffset = (horaCoord + Math.floor(rtt / 2)) - proto.agoraMs();
-    console.log(`${NOME} sincronizou com ${coordenador}: hora=${horaCoord} (rtt=${rtt}ms, offset=${horaOffset}ms)`);
-    s.close();
-  } catch (e) {
-    s.close();
-    console.log(`${NOME}: coordenador ${coordenador} indisponivel, pedindo eleicao`);
-    throw e;
-  }
+  const resp = await chamarServidor(coordenador, proto.RELOGIO);
+  const horaCoord = Number(resp.dados.hora || proto.agoraMs());
+  horaOffset = horaCoord - proto.agoraMs();
+  console.log(`${NOME} sincronizou com ${coordenador}: hora=${horaCoord} (offset=${horaOffset}ms)`);
 }
 
-// --- socket REP do coordenador (responde a hora para os outros) ---
+// --- socket REP entre servidores (relogio + eleicao) ---
 async function servicoCoordenador() {
   const s = new zmq.Reply();
   await s.bind(`tcp://*:${PORTA_COORD}`);
@@ -146,12 +164,20 @@ async function servicoCoordenador() {
     const msg = proto.desempacotar(raw);
     relogio.receber(msg.contador);
     let resp;
-    if (msg.tipo === proto.RELOGIO)
-      resp = proto.empacotar(proto.RELOGIO_OK, NOME, { hora: String(horaLocal()) }, null, relogio.evento());
-    else if (msg.tipo === proto.ELEICAO)
+    if (msg.tipo === proto.RELOGIO) {
+      if (coordenador === NOME)
+        resp = proto.empacotar(proto.RELOGIO_OK, NOME, { hora: String(horaLocal()) }, null, relogio.evento());
+      else
+        resp = proto.empacotar(proto.RELOGIO_OK, NOME, { motivo: "nao_coordenador" }, null, relogio.evento());
+    } else if (msg.tipo === proto.ELEICAO) {
+      // recebi pedido de eleicao de rank menor: respondo OK e marco que
+      // preciso rodar minha propria eleicao (por ter rank maior)
+      console.log(`${NOME} recebeu pedido de eleicao de ${msg.origem}`);
+      eleicaoPendente = true;
       resp = proto.empacotar(proto.ELEICAO_OK, NOME, null, null, relogio.evento());
-    else
+    } else {
       resp = proto.empacotar(proto.RELOGIO_OK, NOME, { motivo: "tipo invalido" }, null, relogio.evento());
+    }
     await s.send(resp);
   }
 }
@@ -250,12 +276,17 @@ async function main() {
     console.log(`${NOME} respondeu: ${proto.formatar(proto.desempacotar(resp))}`);
     await socket.send(resp);
 
+    // se recebi um pedido de eleicao de rank menor, rodo minha propria eleicao
+    if (eleicaoPendente) await eleger();
+
     contadorMsg += 1;
     if (contadorMsg % 10 === 0) await enviarHeartbeat();
     if (contadorMsg % 15 === 0) {
       try {
         await sincronizarRelogio();
       } catch (e) {
+        // o coordenador atual falhou: dispara nova eleicao
+        console.log(`${NOME}: coordenador ${coordenador} indisponivel, pedindo eleicao`);
         await eleger();
       }
     }

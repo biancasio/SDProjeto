@@ -1,5 +1,7 @@
 import zmq
 
+# broker: repassa mensagens entre clientes (5555) e servidor (5556)
+
 context = zmq.Context()
 poller = zmq.Poller()
 
@@ -23,4 +25,3 @@ while True:
     if socks.get(server_socket) == zmq.POLLIN:
         frames = server_socket.recv_multipart()
         client_socket.send_multipart(frames)
-    

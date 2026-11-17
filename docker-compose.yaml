@@ -15,6 +15,8 @@ services:
     volumes:
       - ./python/proxy.py:/app/proxy.py
 
+  # Servico de referencia UNICO: todos os servidores (py e js) usam este,
+  # assim participam da mesma eleicao e elegem um unico coordenador global.
   referencia-py:
     build: ./python
     image: cc7261:python
@@ -97,18 +99,6 @@ services:
       - ./javascript/protocolo.js:/app/protocolo.js
       - ./javascript/mensagem.proto:/app/mensagem.proto
 
-  referencia-js:
-    build: ./javascript
-    image: cc7261:javascript
-    command: ["node", "referencia.js"]
-    environment:
-      NOME_REFERENCIA: referencia-js
-      PORTA_REFERENCIA: "5560"
-    volumes:
-      - ./javascript/referencia.js:/app/referencia.js
-      - ./javascript/protocolo.js:/app/protocolo.js
-      - ./javascript/mensagem.proto:/app/mensagem.proto
-
   servidor-js-1:
     build: ./javascript
     image: cc7261:javascript
@@ -118,7 +108,7 @@ services:
       BROKER_ADDR: tcp://broker-js:5556
       PROXY_PUB: tcp://proxy-py:5557
       PROXY_SUB: tcp://proxy-py:5558
-      REF_ADDR: tcp://referencia-js:5560
+      REF_ADDR: tcp://referencia-py:5560
       PORTA_COORD: "5561"
       DATA_FILE: /data/dados.json
     volumes:
@@ -126,7 +116,7 @@ services:
       - ./javascript/protocolo.js:/app/protocolo.js
       - ./javascript/mensagem.proto:/app/mensagem.proto
       - dados-js-1:/data
-    depends_on: [broker-js, proxy-py, referencia-js]
+    depends_on: [broker-js, proxy-py, referencia-py]
 
   servidor-js-2:
     build: ./javascript
@@ -137,7 +127,7 @@ services:
       BROKER_ADDR: tcp://broker-js:5556
       PROXY_PUB: tcp://proxy-py:5557
       PROXY_SUB: tcp://proxy-py:5558
-      REF_ADDR: tcp://referencia-js:5560
+      REF_ADDR: tcp://referencia-py:5560
       PORTA_COORD: "5561"
       DATA_FILE: /data/dados.json
     volumes:
@@ -145,7 +135,7 @@ services:
       - ./javascript/protocolo.js:/app/protocolo.js
       - ./javascript/mensagem.proto:/app/mensagem.proto
       - dados-js-2:/data
-    depends_on: [broker-js, proxy-py, referencia-js]
+    depends_on: [broker-js, proxy-py, referencia-py]
 
   bot-js-1:
     build: ./javascript

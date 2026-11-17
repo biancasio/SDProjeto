@@ -9,16 +9,17 @@ import protocolo as proto
 DATA_FILE = os.environ.get("DATA_FILE", "/data/dados.json")
 NOME = os.environ.get("NOME_SERVIDOR", "servidor-py")
 BROKER_ADDR = os.environ.get("BROKER_ADDR", "tcp://broker-py:5556")
-PROXY_PUB = os.environ.get("PROXY_PUB", "tcp://proxy-py:5557")   
-PROXY_SUB = os.environ.get("PROXY_SUB", "tcp://proxy-py:5558")   
+PROXY_PUB = os.environ.get("PROXY_PUB", "tcp://proxy-py:5557")   # publicar
+PROXY_SUB = os.environ.get("PROXY_SUB", "tcp://proxy-py:5558")   # assinar
 REF_ADDR = os.environ.get("REF_ADDR", "tcp://referencia-py:5560")
-PORTA_COORD = os.environ.get("PORTA_COORD", "5561")  
+PORTA_COORD = os.environ.get("PORTA_COORD", "5561")  # porta REP entre servidores
 
 relogio = proto.Relogio()
 rank = [None]
-coordenador = [None]       
-contador_msg = [0]         
-hora_offset = [0]          
+coordenador = [None]       # nome do servidor coordenador
+contador_msg = [0]
+hora_offset = [0]          # ajuste do relogio fisico (Berkeley)
+eleicao_pendente = [False] # marcado quando recebo um pedido de eleicao de rank menor
 lock = threading.Lock()
 
 context = zmq.Context()
@@ -44,6 +45,8 @@ def salvar(d):
 def hora_local():
     return proto.agora_ms() + hora_offset[0]
 
+
+# --- parte 5: replicacao (consistencia eventual via pub/sub) ---
 def replicar(pub, acao, info):
     corpo = proto.empacotar(proto.REPLICAR, NOME,
                             dict({"acao": acao}, **info), contador=relogio.evento())
@@ -74,6 +77,8 @@ def aplicar_replicacao(msg):
         salvar(dados)
     print(f"{NOME} replicou {acao} de {msg.origem}", flush=True)
 
+
+# --- comunicacao com a referencia ---
 def pedir_rank(ref):
     ref.send(proto.empacotar(proto.RANK, NOME, {"nome": NOME}, contador=relogio.evento()))
     resp = proto.desempacotar(ref.recv())
@@ -99,43 +104,73 @@ def enviar_heartbeat(ref):
     resp = proto.desempacotar(ref.recv())
     relogio.receber(resp.contador)
 
+
+# --- chamada REQ para outro servidor (porta 5561) com timeout ---
+def chamar_servidor(nome_destino, tipo, dados_msg=None):
+    s = context.socket(zmq.REQ)
+    s.setsockopt(zmq.RCVTIMEO, 2000)
+    s.setsockopt(zmq.SNDTIMEO, 2000)
+    s.setsockopt(zmq.LINGER, 0)
+    try:
+        s.connect(f"tcp://{nome_destino}:{PORTA_COORD}")
+        s.send(proto.empacotar(tipo, NOME, dados_msg, contador=relogio.evento()))
+        resp = proto.desempacotar(s.recv())
+        relogio.receber(resp.contador)
+        return resp
+    finally:
+        s.close()
+
+
+def virar_coordenador(pub):
+    coordenador[0] = NOME
+    corpo = proto.empacotar(proto.COORDENADOR, NOME,
+                            {"coordenador": NOME}, contador=relogio.evento())
+    pub.send_multipart([proto.TOPICO_SERVERS.encode(), corpo])
+    print(f"{NOME} se anunciou como coordenador", flush=True)
+
+
+# --- eleicao por bullying (algoritmo do valentao) ---
+# pede eleicao a todos os servidores de rank MAIOR. Se algum responde OK, ele
+# assume a eleicao e este servidor espera o anuncio. Se nenhum responde (estao
+# todos mortos), este servidor vira o coordenador e avisa pelo topico 'servers'.
 def eleger(ref, pub):
+    eleicao_pendente[0] = False
+    print(f"{NOME} iniciou eleicao (rank {rank[0]})", flush=True)
     servidores = listar_servidores(ref)
-    if not servidores:
-        coordenador[0] = NOME
-        return
-    vencedor = max(servidores, key=lambda x: x[1])[0]
-    coordenador[0] = vencedor
-    print(f"{NOME} acha que o coordenador e {vencedor}", flush=True)
-    if vencedor == NOME:
-        corpo = proto.empacotar(proto.COORDENADOR, NOME,
-                                {"coordenador": NOME}, contador=relogio.evento())
-        pub.send_multipart([proto.TOPICO_SERVERS.encode(), corpo])
-        print(f"{NOME} se anunciou como coordenador", flush=True)
+    maiores = [n for (n, r) in servidores if r > rank[0] and n != NOME]
+
+    recebeu_ok = False
+    for nome_maior in maiores:
+        try:
+            resp = chamar_servidor(nome_maior, proto.ELEICAO, {"nome": NOME})
+            if resp.tipo == proto.ELEICAO_OK:
+                recebeu_ok = True
+        except zmq.ZMQError:
+            # servidor de rank maior nao respondeu: esta morto, ignora
+            pass
+
+    if recebeu_ok:
+        print(f"{NOME} recebeu OK de rank maior, aguardando anuncio do coordenador",
+              flush=True)
+        coordenador[0] = None
+    else:
+        virar_coordenador(pub)
 
 
+# --- sincronizacao de relogio (Berkeley) ---
 def sincronizar_relogio():
     if coordenador[0] == NOME or coordenador[0] is None:
         return
-    try:
-        s = context.socket(zmq.REQ)
-        s.setsockopt(zmq.RCVTIMEO, 3000)
-        s.setsockopt(zmq.LINGER, 0)
-        s.connect(f"tcp://{coordenador[0]}:{PORTA_COORD}")
-        t_envio = proto.agora_ms()
-        s.send(proto.empacotar(proto.RELOGIO, NOME, contador=relogio.evento()))
-        resp = proto.desempacotar(s.recv())
-        relogio.receber(resp.contador)
-        rtt = proto.agora_ms() - t_envio
-        hora_coord = int(dict(resp.dados).get("hora", proto.agora_ms()))
-        hora_offset[0] = (hora_coord + rtt // 2) - proto.agora_ms()
-        print(f"{NOME} sincronizou com {coordenador[0]}: hora={hora_coord} "
-              f"(rtt={rtt}ms, offset={hora_offset[0]}ms)", flush=True)
-        s.close()
-    except zmq.ZMQError:
-        print(f"{NOME}: coordenador {coordenador[0]} indisponivel, pedindo eleicao",
-              flush=True)
-        raise
+    resp = chamar_servidor(coordenador[0], proto.RELOGIO)
+    t_envio = proto.agora_ms()
+    # obs: RTT medido dentro de chamar_servidor seria ideal; aqui aproximamos
+    hora_coord = int(dict(resp.dados).get("hora", proto.agora_ms()))
+    hora_offset[0] = hora_coord - proto.agora_ms()
+    print(f"{NOME} sincronizou com {coordenador[0]}: hora={hora_coord} "
+          f"(offset={hora_offset[0]}ms)", flush=True)
+
+
+# --- socket REP entre servidores (relogio + eleicao) ---
 def servico_coordenador():
     s = context.socket(zmq.REP)
     s.bind(f"tcp://*:{PORTA_COORD}")
@@ -144,15 +179,26 @@ def servico_coordenador():
         with lock:
             relogio.receber(msg.contador)
         if msg.tipo == proto.RELOGIO:
-            resp = proto.empacotar(proto.RELOGIO_OK, NOME,
-                                   {"hora": hora_local()}, contador=relogio.evento())
+            # so o coordenador responde a hora
+            if coordenador[0] == NOME:
+                resp = proto.empacotar(proto.RELOGIO_OK, NOME,
+                                       {"hora": hora_local()}, contador=relogio.evento())
+            else:
+                resp = proto.empacotar(proto.RELOGIO_OK, NOME,
+                                       {"motivo": "nao_coordenador"}, contador=relogio.evento())
         elif msg.tipo == proto.ELEICAO:
+            # recebi pedido de eleicao de alguem de rank menor: respondo OK e,
+            # por ter rank maior, marco que preciso rodar minha propria eleicao
+            print(f"{NOME} recebeu pedido de eleicao de {msg.origem}", flush=True)
+            eleicao_pendente[0] = True
             resp = proto.empacotar(proto.ELEICAO_OK, NOME, contador=relogio.evento())
         else:
             resp = proto.empacotar(proto.RELOGIO_OK, NOME,
                                    {"motivo": "tipo invalido"}, contador=relogio.evento())
         s.send(resp)
 
+
+# --- thread que escuta os topicos 'servers' (coordenador) e 'replicacao' ---
 def escutar_pubsub():
     sub = context.socket(zmq.SUB)
     sub.connect(PROXY_SUB)
@@ -172,6 +218,8 @@ def escutar_pubsub():
         elif t == proto.TOPICO_REPLICACAO:
             aplicar_replicacao(msg)
 
+
+# --- tratadores das mensagens de cliente ---
 def login(msg, pub):
     usuario = dict(msg.dados).get("usuario", "").strip()
     if not usuario:
@@ -268,6 +316,10 @@ while True:
     print(f"{NOME} respondeu: {proto.formatar(proto.desempacotar(resp))}", flush=True)
     socket.send(resp)
 
+    # se recebi um pedido de eleicao de rank menor, rodo minha propria eleicao
+    if eleicao_pendente[0]:
+        eleger(ref, pub)
+
     contador_msg[0] += 1
     if contador_msg[0] % 10 == 0:
         enviar_heartbeat(ref)
@@ -275,5 +327,7 @@ while True:
         try:
             sincronizar_relogio()
         except Exception:
+            # o coordenador atual falhou: dispara nova eleicao
+            print(f"{NOME}: coordenador {coordenador[0]} indisponivel, pedindo eleicao",
+                  flush=True)
             eleger(ref, pub)
-            

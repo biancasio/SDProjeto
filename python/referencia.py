@@ -5,14 +5,22 @@ import zmq
 
 import protocolo as proto
 
+# servico de referencia (parte 3)
+# - fala so com os servidores (REP), nunca com clientes
+# - da rank para cada servidor que pede (sem repetir nome)
+# - guarda e fornece a lista de servidores
+# - heartbeat: servidor avisa que esta vivo; se parar de avisar, e removido
+# - parte 4: o heartbeat NAO devolve mais a hora (a hora vem do coordenador)
+
 NOME = os.environ.get("NOME_REFERENCIA", "referencia-py")
 PORTA = os.environ.get("PORTA_REFERENCIA", "5560")
-TIMEOUT = 30  
+TIMEOUT = 30  # segundos sem heartbeat para remover o servidor
 
-servidores = {}      
-ultimo_hb = {}       
+servidores = {}      # nome -> rank
+ultimo_hb = {}       # nome -> timestamp do ultimo heartbeat
 proximo_rank = [0]
 lock = threading.Lock()
+
 
 def dar_rank(msg):
     nome = dict(msg.dados).get("nome", "")
@@ -24,18 +32,23 @@ def dar_rank(msg):
         rank = servidores[nome]
     return proto.empacotar(proto.RANK_OK, NOME, {"nome": nome, "rank": rank})
 
+
 def listar(msg):
     with lock:
         itens = [f"{n}:{r}" for n, r in servidores.items()]
     return proto.empacotar(proto.LISTA_SERVIDORES, NOME, canais=itens)
+
 
 def heartbeat(msg):
     nome = dict(msg.dados).get("nome", "")
     with lock:
         if nome in servidores:
             ultimo_hb[nome] = time.time()
+    # parte 4: nao devolve mais a hora (so confirma que recebeu o heartbeat)
     return proto.empacotar(proto.HEARTBEAT_OK, NOME, {"ok": "1"})
 
+
+# thread que remove servidores sem heartbeat
 def limpar():
     while True:
         time.sleep(5)
@@ -46,6 +59,7 @@ def limpar():
                 servidores.pop(n, None)
                 ultimo_hb.pop(n, None)
                 print(f"{NOME}: servidor {n} removido (sem heartbeat)", flush=True)
+
 
 context = zmq.Context()
 socket = context.socket(zmq.REP)
@@ -66,4 +80,3 @@ while True:
         resp = proto.empacotar(proto.RANK_OK, NOME, {"motivo": "tipo invalido"})
     print(f"{NOME} respondeu: {proto.formatar(proto.desempacotar(resp))}", flush=True)
     socket.send(resp)
-    
