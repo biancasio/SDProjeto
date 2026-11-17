@@ -17,9 +17,12 @@ PORTA_COORD = os.environ.get("PORTA_COORD", "5561")  # porta REP entre servidore
 relogio = proto.Relogio()
 rank = [None]
 coordenador = [None]       # nome do servidor coordenador
+ranks = {}                 # mapa nome -> rank (atualizado pela referencia)
 contador_msg = [0]
 hora_offset = [0]          # ajuste do relogio fisico (Berkeley)
 eleicao_pendente = [False] # marcado quando recebo um pedido de eleicao de rank menor
+em_eleicao = [False]       # trava: evita iniciar duas eleicoes ao mesmo tempo
+anuncio_recebido = [False] # marca se o anuncio do coordenador ja chegou
 lock = threading.Lock()
 
 context = zmq.Context()
@@ -96,6 +99,7 @@ def listar_servidores(ref):
         if ":" in item:
             n, r = item.rsplit(":", 1)
             out.append((n, int(r)))
+            ranks[n] = int(r)   # guarda o rank de cada servidor conhecido
     return out
 
 
@@ -123,10 +127,15 @@ def chamar_servidor(nome_destino, tipo, dados_msg=None):
 
 def virar_coordenador(pub):
     coordenador[0] = NOME
-    corpo = proto.empacotar(proto.COORDENADOR, NOME,
-                            {"coordenador": NOME}, contador=relogio.evento())
-    pub.send_multipart([proto.TOPICO_SERVERS.encode(), corpo])
-    print(f"{NOME} se anunciou como coordenador", flush=True)
+    anuncio_recebido[0] = True
+    hora_offset[0] = 0
+    # anuncia 2x (com intervalo) para garantir a entrega mesmo com o slow joiner do pub/sub
+    for _ in range(2):
+        corpo = proto.empacotar(proto.COORDENADOR, NOME,
+                                {"coordenador": NOME}, contador=relogio.evento())
+        pub.send_multipart([proto.TOPICO_SERVERS.encode(), corpo])
+        time.sleep(1)
+    print(f"{NOME} se anunciou como coordenador (rank {rank[0]})", flush=True)
 
 
 # --- eleicao por bullying (algoritmo do valentao) ---
@@ -134,27 +143,42 @@ def virar_coordenador(pub):
 # assume a eleicao e este servidor espera o anuncio. Se nenhum responde (estao
 # todos mortos), este servidor vira o coordenador e avisa pelo topico 'servers'.
 def eleger(ref, pub):
+    # trava: se ja estou numa eleicao, nao inicio outra (evita o ping-pong)
+    if em_eleicao[0]:
+        return
+    em_eleicao[0] = True
     eleicao_pendente[0] = False
+    anuncio_recebido[0] = False
     print(f"{NOME} iniciou eleicao (rank {rank[0]})", flush=True)
-    servidores = listar_servidores(ref)
-    maiores = [n for (n, r) in servidores if r > rank[0] and n != NOME]
+    try:
+        servidores = listar_servidores(ref)
+        maiores = [n for (n, r) in servidores if r > rank[0] and n != NOME]
 
-    recebeu_ok = False
-    for nome_maior in maiores:
-        try:
-            resp = chamar_servidor(nome_maior, proto.ELEICAO, {"nome": NOME})
-            if resp.tipo == proto.ELEICAO_OK:
-                recebeu_ok = True
-        except zmq.ZMQError:
-            # servidor de rank maior nao respondeu: esta morto, ignora
-            pass
+        recebeu_ok = False
+        for nome_maior in maiores:
+            try:
+                resp = chamar_servidor(nome_maior, proto.ELEICAO, {"nome": NOME})
+                if resp.tipo == proto.ELEICAO_OK:
+                    recebeu_ok = True
+            except zmq.ZMQError:
+                # servidor de rank maior nao respondeu: esta morto, ignora
+                pass
 
-    if recebeu_ok:
-        print(f"{NOME} recebeu OK de rank maior, aguardando anuncio do coordenador",
-              flush=True)
-        coordenador[0] = None
-    else:
-        virar_coordenador(pub)
+        if recebeu_ok:
+            print(f"{NOME} recebeu OK de rank maior, aguardando anuncio do coordenador",
+                  flush=True)
+            coordenador[0] = None
+            # se o anuncio nao chegar em 10s (o maior pode ter morrido), refaz a eleicao
+            def refazer_se_preciso():
+                time.sleep(10)
+                if not anuncio_recebido[0]:
+                    print(f"{NOME}: anuncio nao chegou, refazendo eleicao", flush=True)
+                    eleger(ref, pub)
+            threading.Thread(target=refazer_se_preciso, daemon=True).start()
+        else:
+            virar_coordenador(pub)
+    finally:
+        em_eleicao[0] = False
 
 
 # --- sincronizacao de relogio (Berkeley) ---
@@ -212,9 +236,21 @@ def escutar_pubsub():
         t = topico.decode()
         if t == proto.TOPICO_SERVERS:
             novo = dict(msg.dados).get("coordenador", "")
+            # so aceita um novo coordenador se ele tiver rank MAIOR OU IGUAL ao
+            # do coordenador atual conhecido. Se eu sou o coordenador e chega um
+            # anuncio de rank menor, ignoro (desempate por rank evita o ping-pong
+            # entre dois servidores que se anunciam ao mesmo tempo).
             if novo and novo != coordenador[0]:
-                coordenador[0] = novo
-                print(f"{NOME} soube que o coordenador agora e {novo}", flush=True)
+                rank_novo = ranks.get(novo, -1)
+                rank_atual = ranks.get(coordenador[0], -1) if coordenador[0] else -1
+                # se eu sou o coordenador e o novo tem rank menor que o meu, ignoro
+                if coordenador[0] == NOME and rank_novo < (rank[0] or -1):
+                    continue
+                if rank_novo >= rank_atual:
+                    coordenador[0] = novo
+                    anuncio_recebido[0] = True
+                    print(f"{NOME} soube que o coordenador agora e {novo} "
+                          f"(rank {rank_novo})", flush=True)
         elif t == proto.TOPICO_REPLICACAO:
             aplicar_replicacao(msg)
 

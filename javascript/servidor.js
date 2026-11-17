@@ -15,9 +15,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const relogio = new proto.Relogio();
 let rank = null;
 let coordenador = null;
+const ranks = {};              // mapa nome -> rank (atualizado pela referencia)
 let contadorMsg = 0;
 let horaOffset = 0;
 let eleicaoPendente = false; // marcado quando recebo pedido de eleicao de rank menor
+let emEleicao = false;        // trava: evita iniciar duas eleicoes ao mesmo tempo
+let anuncioRecebido = false;  // marca se o anuncio do coordenador ja chegou
 
 const ref = new zmq.Request();
 const pub = new zmq.Publisher();
@@ -83,7 +86,11 @@ async function listarServidores() {
   const out = [];
   for (const item of resp.canais || []) {
     const i = item.lastIndexOf(":");
-    if (i > 0) out.push([item.slice(0, i), Number(item.slice(i + 1))]);
+    if (i > 0) {
+      const n = item.slice(0, i), r = Number(item.slice(i + 1));
+      out.push([n, r]);
+      ranks[n] = r;   // guarda o rank de cada servidor conhecido
+    }
   }
   return out;
 }
@@ -114,9 +121,15 @@ async function chamarServidor(nomeDestino, tipo, dadosMsg = null) {
 
 async function virarCoordenador() {
   coordenador = NOME;
-  const corpo = proto.empacotar(proto.COORDENADOR, NOME, { coordenador: NOME }, null, relogio.evento());
-  await pub.send([proto.TOPICO_SERVERS, corpo]);
-  console.log(`${NOME} se anunciou como coordenador`);
+  anuncioRecebido = true;
+  horaOffset = 0;
+  // anuncia 2x (com intervalo) para garantir a entrega mesmo com o slow joiner do pub/sub
+  for (let i = 0; i < 2; i++) {
+    const corpo = proto.empacotar(proto.COORDENADOR, NOME, { coordenador: NOME }, null, relogio.evento());
+    await pub.send([proto.TOPICO_SERVERS, corpo]);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  console.log(`${NOME} se anunciou como coordenador (rank ${rank})`);
 }
 
 // --- eleicao por bullying (algoritmo do valentao) ---
@@ -124,26 +137,41 @@ async function virarCoordenador() {
 // assume a eleicao e este servidor espera o anuncio. Se nenhum responde (estao
 // mortos), este servidor vira o coordenador e avisa pelo topico 'servers'.
 async function eleger() {
+  // trava: se ja estou numa eleicao, nao inicio outra (evita o ping-pong)
+  if (emEleicao) return;
+  emEleicao = true;
   eleicaoPendente = false;
+  anuncioRecebido = false;
   console.log(`${NOME} iniciou eleicao (rank ${rank})`);
-  const servidores = await listarServidores();
-  const maiores = servidores.filter(([n, r]) => r > rank && n !== NOME).map(([n]) => n);
+  try {
+    const servidores = await listarServidores();
+    const maiores = servidores.filter(([n, r]) => r > rank && n !== NOME).map(([n]) => n);
 
-  let recebeuOk = false;
-  for (const nomeMaior of maiores) {
-    try {
-      const resp = await chamarServidor(nomeMaior, proto.ELEICAO, { nome: NOME });
-      if (resp.tipo === proto.ELEICAO_OK) recebeuOk = true;
-    } catch (e) {
-      // servidor de rank maior nao respondeu: esta morto, ignora
+    let recebeuOk = false;
+    for (const nomeMaior of maiores) {
+      try {
+        const resp = await chamarServidor(nomeMaior, proto.ELEICAO, { nome: NOME });
+        if (resp.tipo === proto.ELEICAO_OK) recebeuOk = true;
+      } catch (e) {
+        // servidor de rank maior nao respondeu: esta morto, ignora
+      }
     }
-  }
 
-  if (recebeuOk) {
-    console.log(`${NOME} recebeu OK de rank maior, aguardando anuncio do coordenador`);
-    coordenador = null;
-  } else {
-    await virarCoordenador();
+    if (recebeuOk) {
+      console.log(`${NOME} recebeu OK de rank maior, aguardando anuncio do coordenador`);
+      coordenador = null;
+      // se o anuncio nao chegar em 10s (o maior pode ter morrido), refaz a eleicao
+      setTimeout(() => {
+        if (!anuncioRecebido) {
+          console.log(`${NOME}: anuncio nao chegou, refazendo eleicao`);
+          eleger();
+        }
+      }, 10000);
+    } else {
+      await virarCoordenador();
+    }
+  } finally {
+    emEleicao = false;
   }
 }
 
@@ -194,9 +222,19 @@ async function escutarPubsub() {
     const t = topico.toString();
     if (t === proto.TOPICO_SERVERS) {
       const novo = msg.dados.coordenador || "";
+      // so aceita um novo coordenador se ele tiver rank MAIOR OU IGUAL ao do
+      // coordenador atual conhecido. Se eu sou o coordenador e chega um anuncio
+      // de rank menor, ignoro (desempate por rank evita o ping-pong entre dois
+      // servidores que se anunciam ao mesmo tempo).
       if (novo && novo !== coordenador) {
-        coordenador = novo;
-        console.log(`${NOME} soube que o coordenador agora e ${novo}`);
+        const rankNovo = ranks[novo] !== undefined ? ranks[novo] : -1;
+        const rankAtual = coordenador && ranks[coordenador] !== undefined ? ranks[coordenador] : -1;
+        const souCoordMaior = coordenador === NOME && rankNovo < (rank !== null ? rank : -1);
+        if (!souCoordMaior && rankNovo >= rankAtual) {
+          coordenador = novo;
+          anuncioRecebido = true;
+          console.log(`${NOME} soube que o coordenador agora e ${novo} (rank ${rankNovo})`);
+        }
       }
     } else if (t === proto.TOPICO_REPLICACAO) {
       aplicarReplicacao(msg);

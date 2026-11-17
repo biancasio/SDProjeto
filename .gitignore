@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Node.js / JavaScript
+node_modules/
+npm-debug.log
+
+# Código gerado pelo Protocol Buffers
+python/mensagem_pb2.py
+
+# Dados persistidos localmente (fora de volumes Docker)
+data/
+*.json.bak
