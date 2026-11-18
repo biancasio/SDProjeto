@@ -16,7 +16,7 @@ async function enviar(tipo, dados = null) {
   await socket.send(raw);
   const [resp] = await socket.receive();
   const msg = proto.desempacotar(resp);
-  relogio.receber(msg.contador); // ajusta relogio logico ao receber
+  relogio.receber(msg.contador); 
   console.log(`${NOME} recebeu: ${proto.formatar(msg)}`);
   return msg;
 }
@@ -35,11 +35,10 @@ async function listarCanais() {
   return resp.canais || [];
 }
 
-// loop que recebe as mensagens dos canais inscritos
 async function receber() {
   for await (const [topico, corpo] of sub) {
     const msg = proto.desempacotar(corpo);
-    relogio.receber(msg.contador); // ajusta relogio logico ao receber
+    relogio.receber(msg.contador); 
     const recebido = new Date().toISOString().substr(11, 8);
     const enviado = new Date(Number(msg.timestamp)).toISOString().substr(11, 8);
     const canal = msg.dados.canal || "";
@@ -58,14 +57,12 @@ async function main() {
   await fazerLogin();
   let canais = await listarCanais();
 
-  // 1) se menos de 5 canais, cria um novo
   if (canais.length < 5) {
     const novo = `canal-${canais.length + 1}`;
     await enviar(proto.CRIAR_CANAL, { canal: novo });
     canais = await listarCanais();
   }
 
-  // 2) se inscrito em menos de 3 canais, inscreve em mais um
   const inscritos = [];
   while (inscritos.length < 3 && canais.length) {
     const escolhido = canais[Math.floor(Math.random() * canais.length)];
@@ -77,9 +74,8 @@ async function main() {
     if (new Set(inscritos).size >= new Set(canais).size) break;
   }
 
-  receber(); // roda em paralelo
+  receber(); 
 
-  // 3) loop: escolhe um canal e envia 10 mensagens aleatorias (1s entre elas)
   while (true) {
     canais = await listarCanais();
     if (!canais.length) {

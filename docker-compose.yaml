@@ -15,8 +15,7 @@ services:
     volumes:
       - ./python/proxy.py:/app/proxy.py
 
-  # Servico de referencia UNICO: todos os servidores (py e js) usam este,
-  # assim participam da mesma eleicao e elegem um unico coordenador global.
+  
   referencia-py:
     build: ./python
     image: cc7261:python

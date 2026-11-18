@@ -11,20 +11,44 @@ const PROXY_SUB = process.env.PROXY_SUB || "tcp://proxy-py:5558";
 const REF_ADDR = process.env.REF_ADDR || "tcp://referencia-py:5560";
 const PORTA_COORD = process.env.PORTA_COORD || "5561";
 
+const ESPERA_ANUNCIO_MS = 10000;   
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const relogio = new proto.Relogio();
-let rank = null;
+let rank = 0;
 let coordenador = null;
-const ranks = {};              // mapa nome -> rank (atualizado pela referencia)
-let contadorMsg = 0;
+const ranks = {};
 let horaOffset = 0;
-let eleicaoPendente = false; // marcado quando recebo pedido de eleicao de rank menor
-let emEleicao = false;        // trava: evita iniciar duas eleicoes ao mesmo tempo
-let anuncioRecebido = false;  // marca se o anuncio do coordenador ja chegou
+let contadorMsg = 0;
+let emEleicao = false;
+let anuncioRecebido = true;
 
 const ref = new zmq.Request();
 const pub = new zmq.Publisher();
 let dados = { logins: [], canais: [], publicacoes: [] };
+
+let filaPub = Promise.resolve();
+function publicarFrames(topico, corpo) {
+  filaPub = filaPub.then(() => pub.send([topico, corpo])).catch((e) => {
+    console.log(`${NOME}: erro ao publicar (${e.message})`);
+  });
+  return filaPub;
+}
+
+let filaRef = Promise.resolve();
+function pedirReferencia(tipo, dadosMsg) {
+  const p = filaRef.then(async () => {
+    await ref.send(proto.empacotar(tipo, NOME, dadosMsg, null, relogio.evento()));
+    const [raw] = await ref.receive();
+    const resp = proto.desempacotar(raw);
+    relogio.receber(resp.contador);
+    return resp;
+  });
+  filaRef = p.catch(() => {});
+  return p;
+}
+
+const rankDe = (n) => (n === NOME ? rank : (ranks[n] !== undefined ? ranks[n] : -1));
 
 function carregar() {
   try {
@@ -42,11 +66,9 @@ function horaLocal() {
   return proto.agoraMs() + horaOffset;
 }
 
-// --- parte 5: replicacao (consistencia eventual via pub/sub) ---
 async function replicar(acao, info) {
-  const corpo = proto.empacotar(proto.REPLICAR, NOME,
-    Object.assign({ acao }, info), null, relogio.evento());
-  await pub.send([proto.TOPICO_REPLICACAO, corpo]);
+  const corpo = proto.empacotar(proto.REPLICAR, NOME, Object.assign({ acao }, info), null, relogio.evento());
+  await publicarFrames(proto.TOPICO_REPLICACAO, corpo);
 }
 
 function aplicarReplicacao(msg) {
@@ -68,40 +90,30 @@ function aplicarReplicacao(msg) {
   console.log(`${NOME} replicou ${acao} de ${msg.origem}`);
 }
 
-// --- comunicacao com a referencia ---
 async function pedirRank() {
-  await ref.send(proto.empacotar(proto.RANK, NOME, { nome: NOME }, null, relogio.evento()));
-  const [raw] = await ref.receive();
-  const resp = proto.desempacotar(raw);
-  relogio.receber(resp.contador);
+  const resp = await pedirReferencia(proto.RANK, { nome: NOME });
   rank = Number(resp.dados.rank || 0);
   console.log(`${NOME} recebeu rank ${rank}`);
 }
 
 async function listarServidores() {
-  await ref.send(proto.empacotar(proto.LISTAR_SERVIDORES, NOME, null, null, relogio.evento()));
-  const [raw] = await ref.receive();
-  const resp = proto.desempacotar(raw);
-  relogio.receber(resp.contador);
+  const resp = await pedirReferencia(proto.LISTAR_SERVIDORES, null);
   const out = [];
   for (const item of resp.canais || []) {
     const i = item.lastIndexOf(":");
     if (i > 0) {
       const n = item.slice(0, i), r = Number(item.slice(i + 1));
       out.push([n, r]);
-      ranks[n] = r;   // guarda o rank de cada servidor conhecido
+      ranks[n] = r;
     }
   }
   return out;
 }
 
 async function enviarHeartbeat() {
-  await ref.send(proto.empacotar(proto.HEARTBEAT, NOME, { nome: NOME }, null, relogio.evento()));
-  const [raw] = await ref.receive();
-  relogio.receber(proto.desempacotar(raw).contador);
+  await pedirReferencia(proto.HEARTBEAT, { nome: NOME });
 }
 
-// --- chamada REQ para outro servidor (porta 5561) com timeout ---
 async function chamarServidor(nomeDestino, tipo, dadosMsg = null) {
   const s = new zmq.Request();
   s.receiveTimeout = 2000;
@@ -119,130 +131,158 @@ async function chamarServidor(nomeDestino, tipo, dadosMsg = null) {
   }
 }
 
-async function virarCoordenador() {
-  coordenador = NOME;
-  anuncioRecebido = true;
-  horaOffset = 0;
-  // anuncia 2x (com intervalo) para garantir a entrega mesmo com o slow joiner do pub/sub
-  for (let i = 0; i < 2; i++) {
-    const corpo = proto.empacotar(proto.COORDENADOR, NOME, { coordenador: NOME }, null, relogio.evento());
-    await pub.send([proto.TOPICO_SERVERS, corpo]);
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  console.log(`${NOME} se anunciou como coordenador (rank ${rank})`);
+async function anunciar() {
+  const corpo = proto.empacotar(proto.COORDENADOR, NOME,
+    { coordenador: NOME, rank: String(rank) }, null, relogio.evento());
+  await publicarFrames(proto.TOPICO_SERVERS, corpo);
 }
 
-// --- eleicao por bullying (algoritmo do valentao) ---
-// pede eleicao a todos os servidores de rank MAIOR. Se algum responde OK, ele
-// assume a eleicao e este servidor espera o anuncio. Se nenhum responde (estao
-// mortos), este servidor vira o coordenador e avisa pelo topico 'servers'.
+async function virarCoordenador() {
+  coordenador = NOME;
+  horaOffset = 0;
+  anuncioRecebido = true;
+  console.log(`${NOME} se anunciou como coordenador (rank ${rank})`);
+  for (let i = 0; i < 2; i++) {   
+    await anunciar();
+    if (i === 0) await sleep(1000);
+  }
+}
+
 async function eleger() {
-  // trava: se ja estou numa eleicao, nao inicio outra (evita o ping-pong)
   if (emEleicao) return;
   emEleicao = true;
-  eleicaoPendente = false;
   anuncioRecebido = false;
-  console.log(`${NOME} iniciou eleicao (rank ${rank})`);
   try {
-    const servidores = await listarServidores();
-    const maiores = servidores.filter(([n, r]) => r > rank && n !== NOME).map(([n]) => n);
+    console.log(`${NOME} iniciou eleicao (rank ${rank})`);
+    const aviso = proto.empacotar(proto.AVISO_ELEICAO, NOME, { iniciador: NOME }, null, relogio.evento());
+    await publicarFrames(proto.TOPICO_ELEICOES, aviso);
 
+    const maiores = (await listarServidores()).filter(([n, r]) => r > rank && n !== NOME);
     let recebeuOk = false;
-    for (const nomeMaior of maiores) {
+    for (const [n, r] of maiores) {
       try {
-        const resp = await chamarServidor(nomeMaior, proto.ELEICAO, { nome: NOME });
-        if (resp.tipo === proto.ELEICAO_OK) recebeuOk = true;
+        const resp = await chamarServidor(n, proto.ELEICAO, { nome: NOME });
+        if (resp.tipo === proto.ELEICAO_OK) {
+          recebeuOk = true;
+          console.log(`${NOME} recebeu OK de ${n} (rank ${r})`);
+        }
       } catch (e) {
-        // servidor de rank maior nao respondeu: esta morto, ignora
+        console.log(`${NOME}: ${n} (rank ${r}) nao respondeu`);
       }
     }
 
     if (recebeuOk) {
-      console.log(`${NOME} recebeu OK de rank maior, aguardando anuncio do coordenador`);
-      coordenador = null;
-      // se o anuncio nao chegar em 10s (o maior pode ter morrido), refaz a eleicao
+      console.log(`${NOME} aguardando anuncio do coordenador`);
       setTimeout(() => {
         if (!anuncioRecebido) {
           console.log(`${NOME}: anuncio nao chegou, refazendo eleicao`);
           eleger();
         }
-      }, 10000);
+      }, ESPERA_ANUNCIO_MS);
     } else {
       await virarCoordenador();
     }
+  } catch (e) {
+    console.log(`${NOME}: erro na eleicao (${e.message})`);
   } finally {
     emEleicao = false;
   }
 }
 
-// --- sincronizacao de relogio (Berkeley) ---
 async function sincronizarRelogio() {
-  if (coordenador === NOME || coordenador === null) return;
-  const resp = await chamarServidor(coordenador, proto.RELOGIO);
-  const horaCoord = Number(resp.dados.hora || proto.agoraMs());
-  horaOffset = horaCoord - proto.agoraMs();
-  console.log(`${NOME} sincronizou com ${coordenador}: hora=${horaCoord} (offset=${horaOffset}ms)`);
+  const alvo = coordenador;
+  if (alvo === null) { eleger(); return; }
+  if (alvo === NOME) return;
+  const t0 = proto.agoraMs();
+  let resp;
+  try {
+    resp = await chamarServidor(alvo, proto.RELOGIO);
+  } catch (e) {
+    console.log(`${NOME}: coordenador ${alvo} indisponivel, iniciando eleicao`);
+    eleger();
+    return;
+  }
+  const t1 = proto.agoraMs();
+  if (resp.dados.hora === undefined || resp.dados.hora === "") {
+    console.log(`${NOME}: ${alvo} nao e o coordenador, iniciando eleicao`);
+    eleger();
+    return;
+  }
+  const rtt = t1 - t0;
+  horaOffset = (Number(resp.dados.hora) + Math.floor(rtt / 2)) - t1;
+  console.log(`${NOME} sincronizou com ${alvo}: rtt=${rtt}ms offset=${horaOffset}ms`);
 }
 
-// --- socket REP entre servidores (relogio + eleicao) ---
 async function servicoCoordenador() {
   const s = new zmq.Reply();
   await s.bind(`tcp://*:${PORTA_COORD}`);
   for await (const [raw] of s) {
-    const msg = proto.desempacotar(raw);
-    relogio.receber(msg.contador);
     let resp;
-    if (msg.tipo === proto.RELOGIO) {
-      if (coordenador === NOME)
-        resp = proto.empacotar(proto.RELOGIO_OK, NOME, { hora: String(horaLocal()) }, null, relogio.evento());
-      else
-        resp = proto.empacotar(proto.RELOGIO_OK, NOME, { motivo: "nao_coordenador" }, null, relogio.evento());
-    } else if (msg.tipo === proto.ELEICAO) {
-      // recebi pedido de eleicao de rank menor: respondo OK e marco que
-      // preciso rodar minha propria eleicao (por ter rank maior)
-      console.log(`${NOME} recebeu pedido de eleicao de ${msg.origem}`);
-      eleicaoPendente = true;
-      resp = proto.empacotar(proto.ELEICAO_OK, NOME, null, null, relogio.evento());
-    } else {
-      resp = proto.empacotar(proto.RELOGIO_OK, NOME, { motivo: "tipo invalido" }, null, relogio.evento());
+    let iniciar = false;
+    try {
+      const msg = proto.desempacotar(raw);
+      relogio.receber(msg.contador);
+      if (msg.tipo === proto.RELOGIO) {
+        resp = coordenador === NOME
+          ? proto.empacotar(proto.RELOGIO_OK, NOME, { hora: String(horaLocal()) }, null, relogio.evento())
+          : proto.empacotar(proto.RELOGIO_OK, NOME, { motivo: "nao_coordenador" }, null, relogio.evento());
+      } else if (msg.tipo === proto.ELEICAO) {
+        // responde OK e, como tenho rank maior, faco a minha eleicao
+        console.log(`${NOME} recebeu pedido de eleicao de ${msg.origem}`);
+        resp = proto.empacotar(proto.ELEICAO_OK, NOME, null, null, relogio.evento());
+        iniciar = true;
+      } else {
+        resp = proto.empacotar(proto.RELOGIO_OK, NOME, { motivo: "tipo invalido" }, null, relogio.evento());
+      }
+    } catch (e) {
+      console.log(`${NOME}: erro entre servidores (${e.message})`);
+      resp = proto.empacotar(proto.RELOGIO_OK, NOME, { motivo: "erro" });
     }
     await s.send(resp);
+    if (iniciar) eleger();
   }
 }
 
-// --- escuta os topicos 'servers' (coordenador) e 'replicacao' ---
+function tratarAnuncio(msg) {
+  const novo = msg.dados.coordenador || "";
+  if (!novo || novo === NOME) return;
+  let rankNovo = Number(msg.dados.rank);
+  if (msg.dados.rank === undefined || msg.dados.rank === "" || isNaN(rankNovo)) rankNovo = rankDe(novo);
+  ranks[novo] = rankNovo;
+  const atual = coordenador;
+
+  if (atual === null || novo === atual || rankNovo >= rankDe(atual)) {
+    if (novo !== atual) console.log(`${NOME} soube que o coordenador agora e ${novo} (rank ${rankNovo})`);
+    coordenador = novo;
+    anuncioRecebido = true;
+  } else if (atual === NOME) {
+    anunciar();   
+  }
+}
+
 async function escutarPubsub() {
   const sub = new zmq.Subscriber();
   sub.connect(PROXY_SUB);
   sub.subscribe(proto.TOPICO_SERVERS);
   sub.subscribe(proto.TOPICO_REPLICACAO);
+  sub.subscribe(proto.TOPICO_ELEICOES);
   for await (const [topico, corpo] of sub) {
-    const msg = proto.desempacotar(corpo);
-    relogio.receber(msg.contador);
-    const t = topico.toString();
-    if (t === proto.TOPICO_SERVERS) {
-      const novo = msg.dados.coordenador || "";
-      // so aceita um novo coordenador se ele tiver rank MAIOR OU IGUAL ao do
-      // coordenador atual conhecido. Se eu sou o coordenador e chega um anuncio
-      // de rank menor, ignoro (desempate por rank evita o ping-pong entre dois
-      // servidores que se anunciam ao mesmo tempo).
-      if (novo && novo !== coordenador) {
-        const rankNovo = ranks[novo] !== undefined ? ranks[novo] : -1;
-        const rankAtual = coordenador && ranks[coordenador] !== undefined ? ranks[coordenador] : -1;
-        const souCoordMaior = coordenador === NOME && rankNovo < (rank !== null ? rank : -1);
-        if (!souCoordMaior && rankNovo >= rankAtual) {
-          coordenador = novo;
-          anuncioRecebido = true;
-          console.log(`${NOME} soube que o coordenador agora e ${novo} (rank ${rankNovo})`);
-        }
+    try {
+      const msg = proto.desempacotar(corpo);
+      relogio.receber(msg.contador);
+      const t = topico.toString();
+      if (t === proto.TOPICO_SERVERS) tratarAnuncio(msg);
+      else if (t === proto.TOPICO_REPLICACAO) aplicarReplicacao(msg);
+      else if (t === proto.TOPICO_ELEICOES) {
+        const iniciador = msg.dados.iniciador || "";
+        if (iniciador !== NOME) console.log(`${NOME} soube que ${iniciador} iniciou uma eleicao`);
       }
-    } else if (t === proto.TOPICO_REPLICACAO) {
-      aplicarReplicacao(msg);
+    } catch (e) {
+      console.log(`${NOME}: erro no pub/sub (${e.message})`);
     }
   }
 }
 
-// --- tratadores das mensagens de cliente ---
 async function login(msg) {
   const usuario = (msg.dados.usuario || "").trim();
   if (!usuario) return proto.empacotar(proto.LOGIN_ERRO, NOME, { motivo: "usuario vazio" }, null, relogio.evento());
@@ -274,7 +314,7 @@ async function publicar(msg) {
   if (!canal) return proto.empacotar(proto.PUB_ERRO, NOME, { motivo: "canal vazio" }, null, relogio.evento());
   if (!dados.canais.includes(canal)) dados.canais.push(canal);
   const corpo = proto.empacotar(proto.PUBLICAR, msg.origem, { canal, texto }, null, relogio.evento());
-  await pub.send([canal, corpo]);
+  await publicarFrames(canal, corpo);
   const ts = horaLocal();
   dados.publicacoes.push({ canal, texto, origem: msg.origem, timestamp: ts });
   salvar(dados);
@@ -291,13 +331,12 @@ async function main() {
   ref.connect(REF_ADDR);
 
   await sleep(1000);
-
   await pedirRank();
   servicoCoordenador();
   escutarPubsub();
-  await sleep(2000);
+  await sleep(3000);
   await eleger();
-  console.log(`${NOME} rodando | rank=${rank} | coordenador=${coordenador} | canais=${JSON.stringify(dados.canais)}`);
+  console.log(`${NOME} rodando | rank=${rank} | coordenador=${coordenador}`);
 
   for await (const [raw] of socket) {
     const msg = proto.desempacotar(raw);
@@ -314,20 +353,11 @@ async function main() {
     console.log(`${NOME} respondeu: ${proto.formatar(proto.desempacotar(resp))}`);
     await socket.send(resp);
 
-    // se recebi um pedido de eleicao de rank menor, rodo minha propria eleicao
-    if (eleicaoPendente) await eleger();
-
     contadorMsg += 1;
-    if (contadorMsg % 10 === 0) await enviarHeartbeat();
-    if (contadorMsg % 15 === 0) {
-      try {
-        await sincronizarRelogio();
-      } catch (e) {
-        // o coordenador atual falhou: dispara nova eleicao
-        console.log(`${NOME}: coordenador ${coordenador} indisponivel, pedindo eleicao`);
-        await eleger();
-      }
+    if (contadorMsg % 10 === 0) {
+      try { await enviarHeartbeat(); } catch (e) { console.log(`${NOME}: heartbeat falhou`); }
     }
+    if (contadorMsg % 15 === 0) await sincronizarRelogio();
   }
 }
 

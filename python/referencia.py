@@ -5,19 +5,13 @@ import zmq
 
 import protocolo as proto
 
-# servico de referencia (parte 3)
-# - fala so com os servidores (REP), nunca com clientes
-# - da rank para cada servidor que pede (sem repetir nome)
-# - guarda e fornece a lista de servidores
-# - heartbeat: servidor avisa que esta vivo; se parar de avisar, e removido
-# - parte 4: o heartbeat NAO devolve mais a hora (a hora vem do coordenador)
 
 NOME = os.environ.get("NOME_REFERENCIA", "referencia-py")
 PORTA = os.environ.get("PORTA_REFERENCIA", "5560")
-TIMEOUT = 30  # segundos sem heartbeat para remover o servidor
+TIMEOUT = 30  
 
-servidores = {}      # nome -> rank
-ultimo_hb = {}       # nome -> timestamp do ultimo heartbeat
+servidores = {}     
+ultimo_hb = {}       
 proximo_rank = [0]
 lock = threading.Lock()
 
@@ -44,7 +38,6 @@ def heartbeat(msg):
     with lock:
         if nome in servidores:
             ultimo_hb[nome] = time.time()
-    # parte 4: nao devolve mais a hora (so confirma que recebeu o heartbeat)
     return proto.empacotar(proto.HEARTBEAT_OK, NOME, {"ok": "1"})
 
 
