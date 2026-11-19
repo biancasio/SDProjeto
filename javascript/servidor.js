@@ -22,6 +22,11 @@ let horaOffset = 0;
 let contadorMsg = 0;
 let emEleicao = false;
 let anuncioRecebido = true;
+let timerAnuncio = null;
+let timerHeartbeat = null;
+let falhasCoordenador = 0;
+let verificacaoEmAndamento = false;
+const LIMITE_FALHAS_COORD = 3;
 
 const ref = new zmq.Request();
 const pub = new zmq.Publisher();
@@ -116,8 +121,8 @@ async function enviarHeartbeat() {
 
 async function chamarServidor(nomeDestino, tipo, dadosMsg = null) {
   const s = new zmq.Request();
-  s.receiveTimeout = 2000;
-  s.sendTimeout = 2000;
+  s.receiveTimeout = 4000;
+  s.sendTimeout = 4000;
   s.linger = 0;
   s.connect(`tcp://${nomeDestino}:${PORTA_COORD}`);
   try {
@@ -131,6 +136,24 @@ async function chamarServidor(nomeDestino, tipo, dadosMsg = null) {
   }
 }
 
+async function aguardarRegistros() {
+  const limite = Date.now() + 30000;
+  const total = Number(process.env.TOTAL_SERVIDORES || 4);
+  while (Date.now() < limite) {
+    try {
+      const participantes = await listarServidores();
+      if (participantes.length >= total) {
+        console.log(`${NOME}: ${participantes.length} servidores registrados; iniciando eleicao`);
+        return;
+      }
+    } catch (e) {
+      console.log(`${NOME}: aguardando referencia (${e.message})`);
+    }
+    await sleep(1000);
+  }
+  console.log(`${NOME}: tempo de registro esgotado; iniciando com servidores disponiveis`);
+}
+
 async function anunciar() {
   const corpo = proto.empacotar(proto.COORDENADOR, NOME,
     { coordenador: NOME, rank: String(rank) }, null, relogio.evento());
@@ -139,6 +162,7 @@ async function anunciar() {
 
 async function virarCoordenador() {
   coordenador = NOME;
+  falhasCoordenador = 0;
   horaOffset = 0;
   anuncioRecebido = true;
   console.log(`${NOME} se anunciou como coordenador (rank ${rank})`);
@@ -171,10 +195,13 @@ async function eleger() {
       }
     }
 
+    if (anuncioRecebido && coordenador !== NOME) return;
     if (recebeuOk) {
       console.log(`${NOME} aguardando anuncio do coordenador`);
-      setTimeout(() => {
-        if (!anuncioRecebido) {
+      if (timerAnuncio) clearTimeout(timerAnuncio);
+      timerAnuncio = setTimeout(() => {
+        timerAnuncio = null;
+        if (!anuncioRecebido && !emEleicao) {
           console.log(`${NOME}: anuncio nao chegou, refazendo eleicao`);
           eleger();
         }
@@ -190,27 +217,40 @@ async function eleger() {
 }
 
 async function sincronizarRelogio() {
-  const alvo = coordenador;
-  if (alvo === null) { eleger(); return; }
-  if (alvo === NOME) return;
-  const t0 = proto.agoraMs();
-  let resp;
+  if (verificacaoEmAndamento || emEleicao || timerAnuncio) return;
+  verificacaoEmAndamento = true;
   try {
-    resp = await chamarServidor(alvo, proto.RELOGIO);
-  } catch (e) {
-    console.log(`${NOME}: coordenador ${alvo} indisponivel, iniciando eleicao`);
-    eleger();
-    return;
+    const alvo = coordenador;
+    if (alvo === null) { await eleger(); return; }
+    if (alvo === NOME) { falhasCoordenador = 0; return; }
+    const t0 = proto.agoraMs();
+    try {
+      const resp = await chamarServidor(alvo, proto.RELOGIO);
+      // Resposta recebida: o processo esta vivo, mesmo que esteja
+      // momentaneamente trocando de coordenador.
+      falhasCoordenador = 0;
+      if (coordenador !== alvo) return; // anuncio chegou durante a chamada
+      if (resp.dados.hora === undefined || resp.dados.hora === "") {
+        console.log(`${NOME}: ${alvo} respondeu, mas nao se considera coordenador; aguardando convergencia`);
+        return;
+      }
+      const t1 = proto.agoraMs();
+      const rtt = t1 - t0;
+      horaOffset = (Number(resp.dados.hora) + Math.floor(rtt / 2)) - t1;
+      console.log(`${NOME} sincronizou com ${alvo}: rtt=${rtt}ms offset=${horaOffset}ms`);
+    } catch (e) {
+      if (coordenador !== alvo) { falhasCoordenador = 0; return; }
+      falhasCoordenador++;
+      console.log(`${NOME}: falha ao contatar coordenador ${alvo} (${falhasCoordenador}/${LIMITE_FALHAS_COORD}): ${e.message}`);
+      if (falhasCoordenador >= LIMITE_FALHAS_COORD) {
+        falhasCoordenador = 0;
+        console.log(`${NOME}: coordenador ${alvo} indisponivel apos ${LIMITE_FALHAS_COORD} tentativas; iniciando eleicao`);
+        await eleger();
+      }
+    }
+  } finally {
+    verificacaoEmAndamento = false;
   }
-  const t1 = proto.agoraMs();
-  if (resp.dados.hora === undefined || resp.dados.hora === "") {
-    console.log(`${NOME}: ${alvo} nao e o coordenador, iniciando eleicao`);
-    eleger();
-    return;
-  }
-  const rtt = t1 - t0;
-  horaOffset = (Number(resp.dados.hora) + Math.floor(rtt / 2)) - t1;
-  console.log(`${NOME} sincronizou com ${alvo}: rtt=${rtt}ms offset=${horaOffset}ms`);
 }
 
 async function servicoCoordenador() {
@@ -251,10 +291,18 @@ function tratarAnuncio(msg) {
   ranks[novo] = rankNovo;
   const atual = coordenador;
 
-  if (atual === null || novo === atual || rankNovo >= rankDe(atual)) {
+  // Durante uma eleicao, o anuncio recebido e a resposta que este servidor
+  // estava aguardando. O rank do coordenador anterior pode estar desatualizado
+  // (ele pode ter caido e sido removido pela referencia).
+  if (atual === null || novo === atual || !anuncioRecebido || rankNovo >= rankDe(atual)) {
     if (novo !== atual) console.log(`${NOME} soube que o coordenador agora e ${novo} (rank ${rankNovo})`);
     coordenador = novo;
+    falhasCoordenador = 0;
     anuncioRecebido = true;
+    if (timerAnuncio) {
+      clearTimeout(timerAnuncio);
+      timerAnuncio = null;
+    }
   } else if (atual === NOME) {
     anunciar();   
   }
@@ -332,10 +380,25 @@ async function main() {
 
   await sleep(1000);
   await pedirRank();
+  // Heartbeat independente do trafego dos clientes: evita a remocao
+  // indevida de servidores ativos pela referencia.
+  timerHeartbeat = setInterval(() => {
+    enviarHeartbeat().catch((e) => {
+      console.log(`${NOME}: heartbeat falhou (${e.message})`);
+    });
+  }, 5000);
+
   servicoCoordenador();
   escutarPubsub();
-  await sleep(3000);
+  // A barreira vale somente na inicializacao, nunca durante uma reeleicao.
+  await aguardarRegistros();
   await eleger();
+  // Verifica falhas independentemente das mensagens recebidas dos clientes.
+  setInterval(() => {
+    if (!emEleicao && !timerAnuncio) {
+      sincronizarRelogio().catch(e => console.log(`${NOME}: verificacao falhou (${e.message})`));
+    }
+  }, 5000);
   console.log(`${NOME} rodando | rank=${rank} | coordenador=${coordenador}`);
 
   for await (const [raw] of socket) {

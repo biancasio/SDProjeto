@@ -38,6 +38,7 @@ services:
       PROXY_SUB: tcp://proxy-py:5558
       REF_ADDR: tcp://referencia-py:5560
       PORTA_COORD: "5561"
+      TOTAL_SERVIDORES: "4"
       DATA_FILE: /data/dados.json
     volumes:
       - ./python/servidor.py:/app/servidor.py
@@ -56,6 +57,7 @@ services:
       PROXY_SUB: tcp://proxy-py:5558
       REF_ADDR: tcp://referencia-py:5560
       PORTA_COORD: "5561"
+      TOTAL_SERVIDORES: "4"
       DATA_FILE: /data/dados.json
     volumes:
       - ./python/servidor.py:/app/servidor.py
@@ -109,6 +111,7 @@ services:
       PROXY_SUB: tcp://proxy-py:5558
       REF_ADDR: tcp://referencia-py:5560
       PORTA_COORD: "5561"
+      TOTAL_SERVIDORES: "4"
       DATA_FILE: /data/dados.json
     volumes:
       - ./javascript/servidor.js:/app/servidor.js
@@ -128,6 +131,7 @@ services:
       PROXY_SUB: tcp://proxy-py:5558
       REF_ADDR: tcp://referencia-py:5560
       PORTA_COORD: "5561"
+      TOTAL_SERVIDORES: "4"
       DATA_FILE: /data/dados.json
     volumes:
       - ./javascript/servidor.js:/app/servidor.js

@@ -14,6 +14,7 @@ PROXY_SUB = os.environ.get("PROXY_SUB", "tcp://proxy-py:5558")
 REF_ADDR = os.environ.get("REF_ADDR", "tcp://referencia-py:5560")
 PORTA_COORD = os.environ.get("PORTA_COORD", "5561")
 
+TOTAL_SERVIDORES = int(os.environ.get("TOTAL_SERVIDORES", "4"))
 ESPERA_ANUNCIO = 10   
 
 relogio = proto.Relogio()
@@ -28,6 +29,8 @@ eleicao_pendente = [False]
 anuncio_recebido = [True]
 prazo_anuncio = [None]
 reanunciar = [False]
+falhas_coordenador = [0]
+LIMITE_FALHAS_COORD = 3
 
 lock = threading.Lock()
 context = zmq.Context()
@@ -114,16 +117,55 @@ def listar_servidores(ref):
     return out
 
 
+def aguardar_registros(ref):
+    """Evita eleicoes parciais antes do registro inicial dos participantes."""
+    limite = time.monotonic() + 30
+    while time.monotonic() < limite:
+        try:
+            participantes = listar_servidores(ref)
+            if len(participantes) >= TOTAL_SERVIDORES:
+                print(f"{NOME}: {len(participantes)} servidores registrados; iniciando eleicao", flush=True)
+                return
+        except Exception as e:
+            print(f"{NOME}: aguardando referencia ({e})", flush=True)
+        time.sleep(1)
+    print(f"{NOME}: tempo de registro esgotado; iniciando com servidores disponiveis", flush=True)
+
+
 def enviar_heartbeat(ref):
     ref.send(proto.empacotar(proto.HEARTBEAT, NOME, {"nome": NOME}, contador=relogio.evento()))
     resp = proto.desempacotar(ref.recv())
     relogio.receber(resp.contador)
 
 
+def heartbeat_periodico():
+    """Envia heartbeat em socket proprio, sem depender de mensagens de clientes."""
+    hb = context.socket(zmq.REQ)
+    hb.setsockopt(zmq.RCVTIMEO, 2000)
+    hb.setsockopt(zmq.SNDTIMEO, 2000)
+    hb.setsockopt(zmq.LINGER, 0)
+    hb.connect(REF_ADDR)
+    try:
+        while True:
+            try:
+                with lock:
+                    contador = relogio.evento()
+                hb.send(proto.empacotar(proto.HEARTBEAT, NOME,
+                                        {"nome": NOME}, contador=contador))
+                resp = proto.desempacotar(hb.recv())
+                with lock:
+                    relogio.receber(resp.contador)
+            except Exception as e:
+                print(f"{NOME}: heartbeat falhou ({e})", flush=True)
+            time.sleep(5)
+    finally:
+        hb.close()
+
+
 def chamar_servidor(nome_destino, tipo, dados_msg=None):
     s = context.socket(zmq.REQ)
-    s.setsockopt(zmq.RCVTIMEO, 2000)
-    s.setsockopt(zmq.SNDTIMEO, 2000)
+    s.setsockopt(zmq.RCVTIMEO, 4000)
+    s.setsockopt(zmq.SNDTIMEO, 4000)
     s.setsockopt(zmq.LINGER, 0)
     try:
         s.connect(f"tcp://{nome_destino}:{PORTA_COORD}")
@@ -144,6 +186,7 @@ def anunciar(pub):
 
 def virar_coordenador(pub):
     coordenador[0] = NOME
+    falhas_coordenador[0] = 0
     hora_offset[0] = 0
     anuncio_recebido[0] = True
     prazo_anuncio[0] = None
@@ -177,6 +220,8 @@ def eleger(ref, pub):
             except Exception:
                 print(f"{NOME}: {n} (rank {r}) nao respondeu", flush=True)
 
+        if anuncio_recebido[0] and coordenador[0] != NOME:
+            return
         if recebeu_ok:
             print(f"{NOME} aguardando anuncio do coordenador", flush=True)
             prazo_anuncio[0] = time.time() + ESPERA_ANUNCIO
@@ -195,19 +240,32 @@ def sincronizar_relogio():
         eleicao_pendente[0] = True
         return
     if alvo == NOME:
+        falhas_coordenador[0] = 0
         return
     t0 = proto.agora_ms()
     try:
         resp = chamar_servidor(alvo, proto.RELOGIO)
-    except Exception:
-        print(f"{NOME}: coordenador {alvo} indisponivel, iniciando eleicao", flush=True)
-        eleicao_pendente[0] = True
+    except Exception as e:
+        if coordenador[0] != alvo:
+            falhas_coordenador[0] = 0
+            return
+        falhas_coordenador[0] += 1
+        print(f"{NOME}: falha ao contatar coordenador {alvo} "
+              f"({falhas_coordenador[0]}/{LIMITE_FALHAS_COORD}): {e}", flush=True)
+        if falhas_coordenador[0] >= LIMITE_FALHAS_COORD:
+            falhas_coordenador[0] = 0
+            print(f"{NOME}: coordenador {alvo} indisponivel apos "
+                  f"{LIMITE_FALHAS_COORD} tentativas; iniciando eleicao", flush=True)
+            eleicao_pendente[0] = True
+        return
+    falhas_coordenador[0] = 0
+    if coordenador[0] != alvo:
         return
     t1 = proto.agora_ms()
     d = dict(resp.dados)
     if "hora" not in d:
-        print(f"{NOME}: {alvo} nao e o coordenador, iniciando eleicao", flush=True)
-        eleicao_pendente[0] = True
+        print(f"{NOME}: {alvo} respondeu, mas nao se considera coordenador; "
+              "aguardando convergencia", flush=True)
         return
     rtt = t1 - t0
     hora_offset[0] = (int(d["hora"]) + rtt // 2) - t1
@@ -253,11 +311,15 @@ def tratar_anuncio(msg):
     ranks[novo] = rank_novo
     atual = coordenador[0]
 
-    if atual is None or novo == atual or rank_novo >= rank_de(atual):
+    # Durante uma eleicao, o anuncio recebido e a resposta aguardada.
+    # O rank do coordenador anterior pode estar desatualizado se ele caiu.
+    if atual is None or novo == atual or not anuncio_recebido[0] or rank_novo >= rank_de(atual):
         if novo != atual:
             print(f"{NOME} soube que o coordenador agora e {novo} (rank {rank_novo})", flush=True)
         coordenador[0] = novo
+        falhas_coordenador[0] = 0
         anuncio_recebido[0] = True
+        eleicao_pendente[0] = False
         prazo_anuncio[0] = None
     elif atual == NOME:
         reanunciar[0] = True   
@@ -356,14 +418,17 @@ ref.connect(REF_ADDR)
 time.sleep(1)
 dados = carregar()
 pedir_rank(ref)
+threading.Thread(target=heartbeat_periodico, daemon=True).start()
 threading.Thread(target=servico_coordenador, daemon=True).start()
 threading.Thread(target=escutar_pubsub, daemon=True).start()
-time.sleep(3)
+# Aguarda o registro dos quatro participantes somente na primeira eleicao.
+aguardar_registros(ref)
 eleger(ref, pub)
 print(f"{NOME} rodando | rank={rank[0]} | coordenador={coordenador[0]}", flush=True)
 
 poller = zmq.Poller()
 poller.register(socket, zmq.POLLIN)
+proxima_verificacao = time.monotonic() + 5
 
 while True:
     eventos = dict(poller.poll(500))
@@ -395,6 +460,12 @@ while True:
             except Exception as e:
                 print(f"{NOME}: heartbeat falhou ({e})", flush=True)
         if contador_msg[0] % 15 == 0:
+            sincronizar_relogio()
+
+    # Detecta queda do coordenador mesmo quando nenhum cliente envia mensagens.
+    if time.monotonic() >= proxima_verificacao:
+        proxima_verificacao = time.monotonic() + 5
+        if not em_eleicao[0] and prazo_anuncio[0] is None:
             sincronizar_relogio()
 
     if prazo_anuncio[0] is not None and time.time() > prazo_anuncio[0]:
